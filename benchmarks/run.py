@@ -28,6 +28,7 @@ import argparse
 import asyncio
 import driver
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -36,6 +37,7 @@ import time
 
 HERE = Path(__file__).parent
 SERVER = HERE / "bench_adapter.py"
+PLONE_SERVER = HERE / "plone" / "serve.py"
 
 #: Long enough for an import of uvicorn plus writing the stream file, short
 #: enough that a server which will never come up fails the run rather than
@@ -58,7 +60,9 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def wait_until_ready(port: int, process: subprocess.Popen, timeout: float) -> None:
+def wait_until_ready(
+    port: int, process: subprocess.Popen, timeout: float, path: str = "/page"
+) -> None:
     """Block until the server answers, or fail with what it printed.
 
     Polls with a real request rather than a bare TCP connect: uvicorn accepts
@@ -68,9 +72,10 @@ def wait_until_ready(port: int, process: subprocess.Popen, timeout: float) -> No
     :param port: Port the server was told to bind.
     :param process: The server process, watched so a crash fails fast.
     :param timeout: Seconds to wait before giving up.
+    :param path: Path that must answer 200.
     :raises RuntimeError: If the server exits or never becomes ready.
     """
-    target = driver.Target.parse(f"http://127.0.0.1:{port}/page")
+    target = driver.Target.parse(f"http://127.0.0.1:{port}{path}")
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if process.poll() is not None:
@@ -100,7 +105,12 @@ def _drain(process: subprocess.Popen) -> str:
 
 
 class BenchServer:
-    """A ``bench_adapter`` process, guaranteed to be cleaned up.
+    """A benchmark server process, guaranteed to be cleaned up.
+
+    Two servers, one interface. By default it is ``bench_adapter.py``, a
+    hello-world WSGI app that isolates the adapter. Given ``plone_instance`` it
+    is ``plone/serve.py``: real Zope, the instance's own content, and the
+    page and download URLs read from the manifest ``create_content.py`` wrote.
 
     :ivar adapter: ``ploneasgi`` or ``a2wsgi``.
     :ivar port: The bound port.
@@ -114,58 +124,101 @@ class BenchServer:
         chunk_size: int = 256 * 1024,
         stream_bytes: int = 50 * 1024 * 1024,
         port: int | None = None,
+        plone_instance: Path | None = None,
     ) -> None:
         """
         :param adapter: Which adapter to mount.
         :param workers: Concurrent WSGI calls allowed.
         :param chunk_size: Bytes pulled per thread hop when streaming.
-        :param stream_bytes: Size of the body served on ``/download``.
+        :param stream_bytes: Size of the body served on ``/download``; ignored
+            for Plone, whose body is the manifest's blob.
         :param port: Port to bind; one is chosen if omitted.
+        :param plone_instance: Instance directory holding ``etc/zope.conf``
+            and ``manifest.json``; serve Plone instead of the stand-in app.
         """
         self.adapter = adapter
         self.workers = workers
         self.chunk_size = chunk_size
         self.stream_bytes = stream_bytes
         self.port = port or free_port()
+        self.plone_instance = plone_instance
+        self.manifest = (
+            json.loads((plone_instance / "manifest.json").read_text())
+            if plone_instance
+            else None
+        )
         self._process: subprocess.Popen | None = None
 
     @property
+    def page_path(self) -> str:
+        """:returns: Path of the page that gets probed — the site root for Plone."""
+        return f"/{self.manifest['site']}" if self.manifest else "/page"
+
+    @property
     def page_url(self) -> str:
-        """:returns: URL of the cheap page that gets probed."""
-        return f"http://127.0.0.1:{self.port}/page"
+        """:returns: URL of the page that gets probed."""
+        return f"http://127.0.0.1:{self.port}{self.page_path}"
 
     @property
     def download_url(self) -> str:
         """:returns: URL of the streamed body the slow clients hold open."""
+        if self.manifest:
+            path = self.manifest["download"]["path"]
+            return f"http://127.0.0.1:{self.port}{path}/@@download/file"
         return f"http://127.0.0.1:{self.port}/download"
+
+    def _argv(self) -> list[str]:
+        """:returns: The server's command line."""
+        common = [
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(self.port),
+            "--workers",
+            str(self.workers),
+            "--chunk-size",
+            str(self.chunk_size),
+        ]
+        if self.plone_instance:
+            conf = self.plone_instance / "etc" / "zope.conf"
+            return [
+                sys.executable,
+                str(PLONE_SERVER),
+                self.adapter,
+                "--zope-conf",
+                str(conf),
+                *common,
+            ]
+        return [
+            sys.executable,
+            str(SERVER),
+            self.adapter,
+            *common,
+            "--stream-bytes",
+            str(self.stream_bytes),
+        ]
 
     def __enter__(self) -> BenchServer:
         """Start the server and wait for it to answer.
 
         :returns: Itself.
         """
+        # The instance's site.zcml may name handlers in plone/endpoints.py.
+        # Prepended, not replaced: an inherited PYTHONPATH is the caller's.
+        inherited = os.environ.get("PYTHONPATH")
+        path = os.pathsep.join(p for p in (str(PLONE_SERVER.parent), inherited) if p)
+        env = {**os.environ, "PYTHONPATH": path}
         self._process = subprocess.Popen(  # noqa: S603
-            [
-                sys.executable,
-                str(SERVER),
-                self.adapter,
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(self.port),
-                "--workers",
-                str(self.workers),
-                "--chunk-size",
-                str(self.chunk_size),
-                "--stream-bytes",
-                str(self.stream_bytes),
-            ],
+            self._argv(),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            env=env,
         )
         try:
-            wait_until_ready(self.port, self._process, READY_TIMEOUT)
+            wait_until_ready(
+                self.port, self._process, READY_TIMEOUT, path=self.page_path
+            )
         except Exception:
             self.__exit__(None, None, None)
             raise
@@ -200,6 +253,12 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--chunk-size", type=int, default=256 * 1024)
     parser.add_argument("--stream-bytes", type=int, default=50 * 1024 * 1024)
     parser.add_argument("--port", type=int, default=None)
+    parser.add_argument(
+        "--plone-instance",
+        type=Path,
+        default=None,
+        help="serve this instance's Plone instead of the stand-in app",
+    )
     parser.add_argument("--json", dest="as_json", action="store_true")
 
 
@@ -242,6 +301,7 @@ def main() -> int:
         chunk_size=args.chunk_size,
         stream_bytes=args.stream_bytes,
         port=args.port,
+        plone_instance=args.plone_instance,
     ) as server:
         if args.mode == "starve":
             rows = asyncio.run(
@@ -281,6 +341,7 @@ def main() -> int:
     for row in rows:
         row["adapter"] = args.adapter
         row["workers"] = args.workers
+        row["server"] = "plone" if args.plone_instance else "stand-in"
 
     if args.as_json:
         print(json.dumps(rows, indent=2))

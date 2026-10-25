@@ -54,11 +54,14 @@ ploneasgi/
 │   └── meta.zcml      # directive declaration
 ├── tests/             # 112 tests, none of which need Plone
 │   ├── plone/         # 41 more that do — skipped when Plone is absent
-│   └── bench/         # 3 that need a live server — deselected by default
+│   └── bench/         # live-server gates — deselected by default:
+│                      #   3 `bench` (stand-in app), 11 `bench_plone` (real Plone)
 ├── benchmarks/
 │   ├── bench_adapter.py  # serves /page and /download under either adapter
 │   ├── driver.py         # generates load: starve / throughput / capacity
-│   └── run.py            # starts the server, runs a mode, always tears down
+│   ├── run.py            # starts the server, runs a mode, always tears down
+│   └── plone/            # the same, with a generated Zope instance as the app:
+│                         #   make_instance, create_content, serve, test routes
 └── news/              # towncrier fragments
 ```
 
@@ -100,6 +103,7 @@ make test            # whatever the venv supports: 112, or 153 with Plone
 make test-no-plone   # asserts Plone is absent, then runs the 112
 make test-plone      # asserts Plone is present, then runs the 41
 make bench-test      # asserts the starvation claim; needs a live server
+make bench-plone     # the same claim and the live checks, on a real instance
 make bench-compare   # interleaved ploneasgi vs a2wsgi throughput
 make lint            # read-only — safe for CI
 make format          # the writing one
@@ -228,18 +232,14 @@ for asserting one is higher than usual.
 
 ## Known gaps
 
-- CI (`.github/workflows/ci.yml`) has not run yet: it runs for the first
-  time on the first push, which is where defects in a never-run workflow show
-  up.
-- **`build_wsgi_app` is only tested up to its guard clause.** Everything past the
-  `zope.conf` check needs a generated instance, which the package does not ship.
+- **`build_wsgi_app` is unit-tested only up to its guard clause.** The rest is
+  exercised end to end by `make bench-plone`, which generates an instance and
+  serves it, but no unit test covers it.
 - `run_authenticated(limiter=...)` is plumbed but nothing passes it, so native
   routes draw on anyio's default thread pool rather than the ZODB pool budget.
 - ZEO, RelStorage and PGJsonb untested; only local blobstorage. PGJsonb is the
   one that matters most: its blobs live in PostgreSQL or S3 behind a cache, so
   there is no local blob file to stream from.
-- The route guard and site resolution are tested against the functional layer
-  only, not yet against a running instance.
 - POSIX only, for the unlink-safety argument in the adapter.
 
 ---

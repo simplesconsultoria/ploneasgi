@@ -300,10 +300,35 @@ Throughput on the same body, arms interleaved over 3 cycles: ploneasgi
 overlap, which is the only reason it is worth quoting at all — and it is still a
 warm-cache loopback number, not a production profile.
 
+### Against a real Plone
+
+```bash
+make bench-plone                       # the same gate, plus live checks, on Plone
+python benchmarks/run.py starve --adapter ploneasgi --plone-instance <dir>
+```
+
+The stand-in app isolates the adapter; `benchmarks/plone/` replaces it with a
+generated Zope instance (FileStorage, local blobstorage) and a classic Plone site
+holding a 50 MB published `File`. The slow clients download it through Plone's
+own `@@download/file`, and the probes ask for the site root, rendered by Zope.
+Same laptop, 4 workers:
+
+| slow clients | ploneasgi | a2wsgi |
+| -----------: | --------- | ------ |
+| 4 (= workers) | 12 / 12 | **0 / 12** |
+| 16           | 12 / 12 (p50 18.3 ms, against 17.6 unloaded) | — |
+
+The same run checks what only a running instance can show: the DEBUG log
+records that the download took the streaming branch (a `filestream` iterator
+for a body, not a materialized one), a VirtualHostMonster-rewritten page renders
+`https://` URLs, a private file redirects anonymous visitors to the login form,
+and the ZCML routes in `benchmarks/plone/routes.zcml` enforce their permission
+— a Zope *root* manager arriving through a rewrite included.
+
 ## Known gaps
 
-- **`build_wsgi_app` is tested only up to its guard clause.** Everything past the
-  `zope.conf` check needs a generated instance, which this package does not ship.
+- **`build_wsgi_app` is unit-tested only up to its guard clause.** The rest runs
+  end to end under `make bench-plone`, which generates an instance and serves it.
 - **The access log's `bytes` is what the app emitted, not what the client got.**
   uvicorn's `send` begins `if self.disconnected: return`, discarding chunks after
   a disconnect without telling the application — so an aborted 50 MB download is

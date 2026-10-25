@@ -100,3 +100,25 @@ jobs:
 
       - name: Run the benchmark gate
         run: make bench-test
+
+  bench-plone:
+    # The same claim with Zope as the app — a generated instance, a 50 MB blob,
+    # Plone's own @@download — plus the checks that need a running instance:
+    # VirtualHostMonster rewrites, ZCML routes and their permission guard.
+    name: Starvation gate and live checks on Plone
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-suffix: bench-plone
+          cache-dependency-glob: uv.lock
+
+      - name: Run the Plone-backed gate
+        run: make bench-plone

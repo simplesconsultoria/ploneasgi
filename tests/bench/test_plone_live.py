@@ -1,0 +1,103 @@
+"""The Plone-facing paths, checked against a running instance.
+
+The unit suite was once fully green while native routes refused the Zope root
+administrator; only a real server found it. So the paths that touch
+authentication, traversal and URL generation are checked here over a socket,
+through the whole stack a deployment uses: VirtualHostMonster rewrite, ZCML
+route, permission guard, worker-thread context.
+
+The routes come from ``benchmarks/plone/routes.zcml``: ``/whoami`` guarded by
+``zope2.View``, ``/whoami-manager`` by ``cmf.ManagePortal``.
+"""
+
+from . import basic_auth
+from . import fetch
+
+import json
+import pytest
+
+
+pytestmark = pytest.mark.bench_plone
+
+#: How a proxy rewrites https://example.org/... onto the site.
+VHB = "/VirtualHostBase/https/example.org:443/{root}/VirtualHostRoot"
+
+
+def rewritten(root: str, rest: str) -> str:
+    """:returns: ``rest`` as a proxy rewrites it onto the virtual root ``root``."""
+    return VHB.format(root=root) + rest
+
+
+class TestZopeTraffic:
+    def test_a_rewritten_page_generates_external_urls(self, live, manifest):
+        """The rewrite reaches Zope untouched, so its own VHM applies it."""
+        base, _ = live
+        status, _, body = fetch(base, rewritten(manifest["site"], "/"))
+        assert status == 200
+        assert b"https://example.org" in body
+
+    def test_a_download_is_streamed_not_materialized(self, live, manifest):
+        """The assumption the whole package rests on, observed.
+
+        :mod:`ploneasgi.wsgi` logs each response's body type at DEBUG. A
+        ``filestream`` iterator means the adapter is pulling chunks on the
+        event loop; ``bytes``, ``list`` or ``tuple`` would mean Plone handed it
+        the whole body and the slow-client claim does not apply.
+        """
+        base, log = live
+        path = manifest["download"]["path"] + "/@@download/file"
+        status, headers, body = fetch(base, path)
+        assert status == 200
+        assert len(body) == manifest["download"]["size"]
+        assert int(headers["content-length"]) == manifest["download"]["size"]
+        types = {
+            line.split("body type=")[1].strip()
+            for line in log.read_text().splitlines()
+            if "body type=" in line
+        }
+        assert any(name.startswith("filestream") for name in types), types
+
+    def test_a_private_download_is_refused(self, live, manifest):
+        """Not followed: the redirect to the login form *is* the refusal."""
+        base, _ = live
+        status, headers, _ = fetch(
+            base, manifest["private"]["path"] + "/@@download/file"
+        )
+        assert status == 302
+        assert "require_login" in headers["location"]
+
+
+class TestNativeRoutes:
+    def test_anonymous_passes_a_view_guard(self, live):
+        base, _ = live
+        status, _, body = fetch(base, "/++asgi++/whoami")
+        assert status == 200
+        assert json.loads(body)["user"] == "Anonymous User"
+
+    def test_anonymous_is_refused_by_a_manage_guard(self, live):
+        base, _ = live
+        assert fetch(base, "/++asgi++/whoami-manager")[0] == 403
+
+    def test_the_zope_root_admin_passes_through_the_rewrite(self, live, manifest):
+        """The regression a real server found first: a root user, behind VHM."""
+        base, _ = live
+        path = rewritten(manifest["site"], "/++asgi++/whoami-manager")
+        status, _, body = fetch(base, path, basic_auth(*manifest["admin"]))
+        assert status == 200
+        data = json.loads(body)
+        assert data["user"] == manifest["admin"][0]
+        assert data["portal"] == manifest["site"]
+        # Scheme and host come from the rewrite, not from the socket.
+        assert data["url"].startswith("https://example.org")
+
+    def test_a_folder_as_virtual_root_enters_its_site(self, live, manifest):
+        base, _ = live
+        root = manifest["vroot"]["path"].lstrip("/")
+        status, _, body = fetch(base, rewritten(root, "/++asgi++/whoami"))
+        assert status == 200
+        assert json.loads(body)["portal"] == manifest["site"]
+
+    @pytest.mark.parametrize("root", ["no-such-site", "acl_users"])
+    def test_a_root_that_is_not_a_site_is_not_found(self, live, root):
+        base, _ = live
+        assert fetch(base, rewritten(root, "/++asgi++/whoami"))[0] == 404

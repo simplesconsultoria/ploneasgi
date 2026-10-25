@@ -167,3 +167,15 @@ bench-test: install-bench ## Run the benchmark assertions
 	  assert u.find_spec('a2wsgi'), 'a2wsgi missing: the falsifier arm cannot run'; \
 	  print('  a2wsgi present: the comparison is falsifiable')"
 	@uv run pytest tests/bench -m bench
+
+# The same claim with Zope as the app, plus the checks that need a running
+# instance. Plone and a2wsgi both have to be present: one is the app, the other
+# the falsifier.
+.PHONY: bench-plone
+bench-plone: install-plone install-bench ## Run the starvation gate and live checks against real Plone
+	@echo "$(GREEN)==> Plone-backed benchmark gate$(RESET)"
+	@uv run python -c "import importlib.util as u; \
+	  missing = [p for p in ('Products.CMFPlone', 'a2wsgi') if not u.find_spec(p)]; \
+	  assert not missing, f'not installed: {missing}'; \
+	  print('  Plone and a2wsgi: present')"
+	@uv run pytest tests/bench -m bench_plone

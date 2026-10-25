@@ -15,6 +15,8 @@ claim: environment configuration, one ``zope.conf``, no ini.
 Usage::
 
     python benchmarks/plone/make_instance.py /tmp/bench-instance
+    python benchmarks/plone/make_instance.py /tmp/bench-instance \\
+        --routes-zcml benchmarks/plone/routes.zcml
 """
 
 from pathlib import Path
@@ -35,12 +37,7 @@ verbose-security off
 <zodb_db main>
     cache-size 30000
     pool-size {pool_size}
-    <blobstorage>
-        blob-dir {home}/var/blobstorage
-        <filestorage>
-            path {home}/var/filestorage/Data.fs
-        </filestorage>
-    </blobstorage>
+{storage}
     mount-point /
 </zodb_db>
 """
@@ -48,6 +45,17 @@ verbose-security off
 # parse with "unknown type name". Logging is configured in Python by
 # ploneasgi.settings.setup_logging, which is the point — this file exists only
 # to name a database.
+
+#: The storage section of ``<zodb_db main>``, one per supported backend.
+STORAGES = {
+    "file": """\
+    <blobstorage>
+        blob-dir {home}/var/blobstorage
+        <filestorage>
+            path {home}/var/filestorage/Data.fs
+        </filestorage>
+    </blobstorage>""",
+}
 
 # Modelled on what cookiecutter-zope-instance generates, because the order here
 # is load-bearing and not guessable: `five:loadProducts file="meta.zcml"` is what
@@ -66,26 +74,47 @@ SITE_ZCML = """\
   <five:loadProducts file="meta.zcml"/>
   <five:loadProducts />
   <five:loadProductsOverrides />
-
+{extra}
   <securityPolicy component="AccessControl.security.SecurityPolicy" />
 </configure>
 """
 
+#: Loaded after the products, so the permissions a route names already exist.
+ROUTES_INCLUDE = """
+  <include package="ploneasgi" file="meta.zcml" />
+  <include file="{path}" />
+"""
 
-def build(home: Path, *, pool_size: int = 16) -> Path:
+
+def build(
+    home: Path,
+    *,
+    pool_size: int = 16,
+    storage: str = "file",
+    routes_zcml: Path | None = None,
+) -> Path:
     """Write a minimal instance layout and return its ``zope.conf``.
 
     :param home: Directory to build the instance in; created if absent.
     :param pool_size: ZODB connection pool size.
+    :param storage: Key of :data:`STORAGES` naming the database backend.
+    :param routes_zcml: ZCML file registering native routes, included last.
     :returns: Path to the generated ``zope.conf``.
+    :raises ValueError: On an unknown storage.
     """
+    if storage not in STORAGES:
+        raise ValueError(f"unknown storage {storage!r}; choose from {sorted(STORAGES)}")
+
     home = home.resolve()
     for sub in ("etc", "var/filestorage", "var/blobstorage"):
         (home / sub).mkdir(parents=True, exist_ok=True)
 
+    section = STORAGES[storage].format(home=home)
     conf = home / "etc" / "zope.conf"
-    conf.write_text(ZOPE_CONF.format(home=home, pool_size=pool_size))
-    (home / "etc" / "site.zcml").write_text(SITE_ZCML)
+    conf.write_text(ZOPE_CONF.format(home=home, pool_size=pool_size, storage=section))
+
+    extra = ROUTES_INCLUDE.format(path=routes_zcml.resolve()) if routes_zcml else ""
+    (home / "etc" / "site.zcml").write_text(SITE_ZCML.format(extra=extra))
     return conf
 
 
@@ -97,9 +126,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("home", type=Path)
     parser.add_argument("--pool-size", type=int, default=16)
+    parser.add_argument("--storage", choices=sorted(STORAGES), default="file")
+    parser.add_argument("--routes-zcml", type=Path, default=None)
     args = parser.parse_args()
 
-    conf = build(args.home, pool_size=args.pool_size)
+    conf = build(
+        args.home,
+        pool_size=args.pool_size,
+        storage=args.storage,
+        routes_zcml=args.routes_zcml,
+    )
     print(conf)
     return 0
 
