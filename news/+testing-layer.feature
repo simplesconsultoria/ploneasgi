@@ -1,0 +1,1 @@
+Added `ploneasgi.testing`, a `PloneSandboxLayer` with integration and functional variants, so projects can test code that reaches Plone from a worker thread. Install it with the `testing` extra. @ericof

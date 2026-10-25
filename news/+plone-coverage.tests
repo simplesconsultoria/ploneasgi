@@ -1,0 +1,1 @@
+Added coverage for `context.py` and `zopeapp.py`, the two modules that need a real Plone and previously had none. The security assertions were mutation-tested, and the Zope-free import boundary is now checked in-process as well as by `make test-no-plone`. @ericof
