@@ -1,0 +1,42 @@
+name: Change log check
+
+on:
+  pull_request:
+    types: [assigned, opened, synchronize, reopened, labeled, unlabeled]
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.14"
+
+jobs:
+  check:
+    name: News fragment
+    # Dependabot pull requests, and those labeled "skip changelog", need no news
+    # fragment. The author check matters on its own: Dependabot silently drops a
+    # label that does not exist in the repository.
+    if: ${{ github.event.pull_request.user.login != 'dependabot[bot]' && !contains(github.event.pull_request.labels.*.name, 'skip changelog') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # towncrier compares against the base branch, so it needs history.
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-suffix: changelog
+
+      - name: Check for a news fragment
+        env:
+          BASE_BRANCH: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags origin "${BASE_BRANCH}"
+          uvx towncrier check --compare-with "origin/${BASE_BRANCH}" --config pyproject.toml --dir .

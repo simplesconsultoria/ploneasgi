@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # requires-python is ">=3.14", and nothing else is exercised. Widening it
+  # needs a matrix here first.
+  PYTHON_VERSION: "3.14"
+
+jobs:
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-suffix: lint
+          cache-dependency-glob: uv.lock
+
+      # Read-only: `make lint` passes --no-fix, because the ruff config sets
+      # fix = true and a check must never rewrite the tree it checks.
+      - name: Lint
+        run: make lint
+
+  test-no-plone:
+    # The structural claim: most of the package runs with Plone absent. The
+    # target asserts Products, Zope2, AccessControl and plone are not
+    # installed before it runs anything.
+    name: Tests without Plone
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-suffix: no-plone
+          cache-dependency-glob: uv.lock
+
+      - name: Run the Zope-free suite
+        run: make test-no-plone
+
+  test-plone:
+    # The mirror image. tests/conftest.py skips tests/plone when Plone is
+    # absent, so the target asserts it is present — otherwise this job could
+    # cover nothing and still be green.
+    name: Tests with Plone
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-suffix: plone
+          cache-dependency-glob: uv.lock
+
+      - name: Run the Plone suite
+        run: make test-plone
+
+  bench-test:
+    # The package's central claim, as categorical assertions only: 12/12 page
+    # probes under ploneasgi, 0/12 under a2wsgi. No throughput threshold, which
+    # would be noise on a shared runner.
+    name: Starvation gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-suffix: bench
+          cache-dependency-glob: uv.lock
+
+      - name: Run the benchmark gate
+        run: make bench-test
