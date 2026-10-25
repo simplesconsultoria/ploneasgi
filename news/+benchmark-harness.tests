@@ -1,0 +1,1 @@
+Added a self-contained benchmark harness: `benchmarks/driver.py` generates load, `benchmarks/run.py` starts and stops the server around it, and `make bench-starve` / `bench-throughput` / `bench-capacity` / `bench-compare` drive them. `make bench-test` runs the starvation claim as an assertion, including the a2wsgi arm that must starve for the comparison to mean anything. @ericof
