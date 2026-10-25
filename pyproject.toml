@@ -1,0 +1,179 @@
+[project]
+name = "ploneasgi"
+version = "1.0.0a0.dev0"
+description = "Run Plone under an ASGI server"
+readme = "README.md"
+license = "GPL-2.0-only"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Érico Andrei", email = "ericof@plone.org" }
+]
+keywords = [
+    "ASGI",
+    "Plone",
+    "Python",
+    "WSGI",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "Framework :: Plone",
+    "Framework :: Plone :: 6.2",
+    "Operating System :: POSIX",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3.14",
+]
+requires-python = ">=3.14"
+dependencies = [
+    "anyio",
+    "python-dotenv",
+    "starlette",
+    "uvicorn",
+    # Not uvicorn[standard]: that also pulls uvloop.
+    "httptools",
+    "websockets",
+    # For the <ploneasgi:route /> directive. Not Zope — no ZODB in this closure.
+    "zope.component",
+    "zope.configuration",
+    "zope.schema",
+]
+
+[project.optional-dependencies]
+plone = [
+    "Products.CMFPlone",
+]
+# What `ploneasgi.testing` imports. A project building its own layer on top of
+# ours needs these; a production install does not. Named for the module rather
+# than `test` so it does not collide with the `test` dependency-group below.
+testing = [
+    "plone.app.testing",
+    "plone.app.contenttypes",
+]
+
+[project.urls]
+Homepage = "https://github.com/simplesconsultoria/ploneasgi"
+Source = "https://github.com/simplesconsultoria/ploneasgi"
+Tracker = "https://github.com/simplesconsultoria/ploneasgi/issues"
+
+[dependency-groups]
+test = [
+    "pytest",
+]
+# The harness for the Plone half of the suite only. Kept out of `test` so the
+# Zope-free environment stays genuinely Zope-free.
+test-plone = [
+    "pytest-plone",
+]
+# a2wsgi is the incumbent this package claims to beat; keep the claim falsifiable.
+bench = [
+    "a2wsgi",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Every test directory is a package, so modules that share a basename in
+# sibling directories (tests/test_zopeapp.py, tests/plone/test_zopeapp.py) get
+# distinct dotted names under the default import mode.
+# `-m 'not bench'` keeps the default run fast. Deselection is *reported* ("N
+# deselected"), unlike a skip that scrolls past — the benchmark gate should never
+# be able to disappear quietly.
+addopts = "-m 'not bench'"
+markers = [
+    "bench: needs a live server on a real port and takes tens of seconds; run with `make bench-test`",
+]
+
+[tool.towncrier]
+directory = "news/"
+filename = "CHANGELOG.md"
+start_string = "<!-- towncrier release notes start -->\n"
+title_format = "## {version} ({project_date})"
+template = "news/.changelog_template.jinja"
+issue_format = "[#{issue}](https://github.com/simplesconsultoria/ploneasgi/issues/{issue})"
+underlines = ["", "", ""]
+
+[[tool.towncrier.type]]
+directory = "breaking"
+name = "Breaking changes:"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "feature"
+name = "New features:"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "bugfix"
+name = "Bug fixes:"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "internal"
+name = "Internal:"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "documentation"
+name = "Documentation:"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "tests"
+name = "Tests"
+showcontent = true
+
+[tool.ruff]
+target-version = "py314"
+line-length = 88
+fix = true
+lint.select = [
+    # flake8-2020
+    "YTT",
+    # flake8-bandit
+    "S",
+    # flake8-bugbear
+    "B",
+    # flake8-builtins
+    "A",
+    # flake8-comprehensions
+    "C4",
+    # flake8-debugger
+    "T10",
+    # flake8-simplify
+    "SIM",
+    # mccabe
+    "C90",
+    # pycodestyle
+    "E", "W",
+    # pyflakes
+    "F",
+    # pygrep-hooks
+    "PGH",
+    # pyupgrade
+    "UP",
+    # ruff
+    "RUF",
+]
+lint.ignore = [
+    # DoNotAssignLambda
+    "E731",
+]
+
+[tool.ruff.lint.isort]
+case-sensitive = false
+no-sections = true
+force-single-line = true
+from-first = true
+lines-after-imports = 2
+lines-between-types = 1
+order-by-type = false
+
+[tool.ruff.format]
+preview = true
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501", "RUF001", "S101"]
+"benchmarks/*" = ["E501", "RUF001", "S101", "S104"]
+
+[build-system]
+requires = ["uv_build>=0.11.24,<0.12.0"]
+build-backend = "uv_build"

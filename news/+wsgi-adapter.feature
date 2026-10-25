@@ -1,0 +1,1 @@
+Added `ploneasgi.wsgi.WSGIMiddleware`, an ASGI/WSGI adapter that streams response bodies from the event loop instead of the worker thread, so a slow client no longer pins a thread for the length of its download. @ericof

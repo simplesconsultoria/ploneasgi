@@ -1,0 +1,1 @@
+Added `ploneasgi.context.run_authenticated`, which gives a native ASGI route an authenticated Plone context — ZODB connection, current site and security manager — inside a worker thread, and tears it down afterwards. @ericof

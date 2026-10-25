@@ -1,0 +1,1 @@
+Added a `<ploneasgi:route />` ZCML directive so add-ons can register native ASGI routes, with a permission — named by its id, as in any other ZCML directive — checked against the portal before the handler runs. @ericof

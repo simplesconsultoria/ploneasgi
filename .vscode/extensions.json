@@ -1,0 +1,11 @@
+{
+  "recommendations": [
+    "charliermarsh.ruff",
+    "ms-python.python",
+    "ExecutableBookProject.myst-highlight",
+    "ms-vscode-remote.remote-containers",
+    "editorconfig.editorconfig",
+    "github.vscode-github-actions",
+    "ms-python.vscode-python-envs"
+  ]
+}

@@ -1,0 +1,16 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+# The glob matters: `make test-no-plone` builds a second one, .venv-no-plone.
+.venv*
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/

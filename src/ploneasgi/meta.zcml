@@ -1,0 +1,18 @@
+<configure
+    xmlns="http://namespaces.zope.org/meta"
+    i18n_domain="ploneasgi"
+    >
+
+  <!-- Own namespace rather than plone's: this is a third-party directive, and
+       squatting in plone: risks colliding with a future core one. -->
+  <directives namespace="http://namespaces.plone.org/ploneasgi">
+
+    <directive
+        name="route"
+        handler="ploneasgi.zcml.routeDirective"
+        schema="ploneasgi.zcml.IASGIRouteDirective"
+        />
+
+  </directives>
+
+</configure>
