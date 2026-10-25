@@ -325,6 +325,38 @@ for a body, not a materialized one), a VirtualHostMonster-rewritten page renders
 and the ZCML routes in `benchmarks/plone/routes.zcml` enforce their permission
 — a Zope *root* manager arriving through a rewrite included.
 
+### On networked storages
+
+```bash
+make bench-storage     # ZEO, RelStorage and PGJsonb; PostgreSQL via Docker
+```
+
+FileStorage serves a blob from a file that already exists. ZEO, RelStorage and
+PGJsonb do not have one: each fetches the blob into a local cache on first read,
+over the ZEO protocol or out of PostgreSQL. PGJsonb has no blob directory at
+all: with no S3 configured, every blob lives in a `bytea` column. Blob directories are
+deliberately not shared, so the fetch happens.
+
+Where that fetch runs decides whether the claim survives, so it was measured,
+not assumed. ZODB fetches while unghosting the `Blob`, inside the WSGI call, on
+a worker thread. A cold 50 MB fetch held one for, on one laptop, one run each:
+
+| storage | cold fetch, in the worker | warm |
+| ------- | ------------------------: | ---: |
+| ZEO (local server) | 0.12 s | ~0 |
+| RelStorage (PostgreSQL 17) | 3.7 s | ~0 |
+| PGJsonb (PostgreSQL 17) | 1.2 s | ~0 |
+
+That is *work*, bounded by the storage, and the worker is released before the
+transfer begins. The transfer still streams from the local cache file on the
+event loop. Every round of the gate starts with the caches emptied, and on each
+storage ploneasgi answers 12/12 page probes under 16 slow downloads while
+a2wsgi answers 0/12 under 4.
+
+What the table does mean: on RelStorage, a burst of first downloads of large,
+uncached blobs can occupy every worker for seconds. Size `workers` and the blob
+cache with that in mind.
+
 ## Known gaps
 
 - **`build_wsgi_app` is unit-tested only up to its guard clause.** The rest runs
@@ -343,10 +375,10 @@ and the ZCML routes in `benchmarks/plone/routes.zcml` enforce their permission
 - **Request bodies are fully buffered** before the WSGI app is called, spilling to
   disk past 512 KB. a2wsgi streams them instead, at the cost of a blocking round
   trip per read.
-- **Only local blobstorage tested.** ZEO and RelStorage without a shared blob dir
-  fetch into a local cache first; that fetch lands in the worker thread.
-  PGJsonb keeps blobs in PostgreSQL or S3 with no local blob file at all, and
-  how it behaves here has not been measured yet.
+- **PGJsonb's S3 tier is untested.** The matrix covers its PostgreSQL `bytea`
+  blobs. With S3 configured, blobs above `blob-threshold` go there instead,
+  behind the same local cache; testing that would need MinIO in the fixtures. ZEO and RelStorage are tested with unshared
+  blob directories only, which is the harder case.
 - **POSIX only** for the unlink-safety argument.
 - **`run_authenticated(limiter=...)` is plumbed but unused.** Native routes draw
   on anyio's default thread pool rather than the ZODB pool budget.

@@ -179,3 +179,21 @@ bench-plone: install-plone install-bench ## Run the starvation gate and live che
 	  assert not missing, f'not installed: {missing}'; \
 	  print('  Plone and a2wsgi: present')"
 	@uv run pytest tests/bench -m bench_plone
+
+.PHONY: install-storage
+install-storage: ## Install the networked storages (ZEO, RelStorage, PGJsonb)
+	@echo "$(GREEN)==> Installing storage backends$(RESET)"
+	@uv sync --inexact --group bench-storage --group test
+
+# The same gate on every networked storage, each of which fetches a blob into a
+# local cache on first read. PostgreSQL comes from a throwaway Docker container,
+# or from BENCH_PG_DSN when that names a server.
+.PHONY: bench-storage
+bench-storage: install-plone install-bench install-storage ## Run the Plone gate on ZEO, RelStorage and PGJsonb
+	@echo "$(GREEN)==> Storage matrix$(RESET)"
+	@uv run python -c "import importlib.util as u; \
+	  missing = [p for p in ('Products.CMFPlone', 'a2wsgi', 'ZEO', 'relstorage', \
+	                         'psycopg2', 'zodb_pgjsonb') if not u.find_spec(p)]; \
+	  assert not missing, f'not installed: {missing}'; \
+	  print('  Plone, a2wsgi and the three storages: present')"
+	@uv run pytest tests/bench -m bench_storage

@@ -122,3 +122,26 @@ jobs:
 
       - name: Run the Plone-backed gate
         run: make bench-plone
+
+  bench-storage:
+    # The Plone gate on ZEO, RelStorage and PGJsonb, each fetching the blob into
+    # a local cache on first read. The fixtures start PostgreSQL in Docker, as
+    # they do locally, rather than a service container: one code path, tested
+    # in both places.
+    name: Starvation gate on networked storages
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-suffix: bench-storage
+          cache-dependency-glob: uv.lock
+
+      - name: Run the storage matrix
+        run: make bench-storage

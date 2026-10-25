@@ -11,48 +11,20 @@ Marked ``bench_plone`` rather than ``bench``: they need Plone installed, which
 ``make bench-plone`` runs them.
 """
 
+from . import PROBES
+from . import WORKERS
 from . import round_named
-from . import run_bench
+from . import starve_plone
 
 import pytest
 
 
 pytestmark = pytest.mark.bench_plone
 
-WORKERS = 4
-PROBES = 12
-
-#: A rendered Plone page takes tens of milliseconds, not the stand-in's two;
-#: this stays far below "held until the download finishes", which is hours.
-PROBE_TIMEOUT = 10.0
-
-
-def starve(adapter: str, slow_clients: int, instance) -> list[dict]:
-    """Run one starve round against the instance.
-
-    :param adapter: ``ploneasgi`` or ``a2wsgi``.
-    :param slow_clients: Concurrent throttled downloads.
-    :param instance: The instance directory.
-    :returns: The baseline and loaded rows.
-    """
-    rows = run_bench(
-        "starve",
-        adapter,
-        workers=WORKERS,
-        slow_clients=slow_clients,
-        probes=PROBES,
-        probe_timeout=PROBE_TIMEOUT,
-        plone_instance=instance,
-    )
-    assert {row["server"] for row in rows} == {"plone"}, (
-        "the run did not serve Plone; this would be the stand-in result again"
-    )
-    return rows
-
 
 class TestPloneasgiSurvivesSlowPloneDownloads:
     def test_serves_every_page_under_four_times_its_workers(self, plone_instance):
-        rows = starve("ploneasgi", WORKERS * 4, plone_instance)
+        rows = starve_plone("ploneasgi", WORKERS * 4, plone_instance)
         assert round_named(rows, "baseline")["ok"] == PROBES
         loaded = round_named(rows, "loaded")
         assert loaded["ok"] == PROBES, (
@@ -67,7 +39,7 @@ class TestA2wsgiStarvesOnPlone:
     above proves nothing."""
 
     def test_stops_answering_at_its_worker_count(self, plone_instance):
-        rows = starve("a2wsgi", WORKERS, plone_instance)
+        rows = starve_plone("a2wsgi", WORKERS, plone_instance)
         assert round_named(rows, "baseline")["ok"] == PROBES, (
             "a2wsgi could not serve Plone pages even unloaded"
         )

@@ -68,6 +68,14 @@ test-plone = [
 bench = [
     "a2wsgi",
 ]
+# The networked storages the matrix runs on. psycopg2 is RelStorage's driver;
+# PGJsonb brings psycopg 3 itself, which the fixtures also use.
+bench-storage = [
+    "psycopg2-binary>=2.9.13",
+    "relstorage>=4.3.0",
+    "zeo>=6.2",
+    "zodb-pgjsonb>=1.19.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -77,10 +85,11 @@ testpaths = ["tests"]
 # `-m 'not bench'` keeps the default run fast. Deselection is *reported* ("N
 # deselected"), unlike a skip that scrolls past — the benchmark gate should never
 # be able to disappear quietly.
-addopts = "-m 'not bench and not bench_plone'"
+addopts = "-m 'not bench and not bench_plone and not bench_storage'"
 markers = [
     "bench: needs a live server on a real port and takes tens of seconds; run with `make bench-test`",
     "bench_plone: needs Plone, builds a real instance and serves it; run with `make bench-plone`",
+    "bench_storage: bench_plone on ZEO, RelStorage and PGJsonb; needs Docker or BENCH_PG_DSN; run with `make bench-storage`",
 ]
 
 [tool.towncrier]

@@ -14,6 +14,7 @@ import base64
 import http.client
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -88,45 +89,254 @@ def _plone_env() -> dict[str, str]:
     return {**os.environ, "PYTHONPATH": path}
 
 
-def build_plone_instance(home: Path, *, storage: str = "file", **env: str) -> Path:
-    """Generate an instance and create the benchmark site in it.
+def write_plone_instance(home: Path, *, storage: str = "file", **options: str) -> Path:
+    """Generate an instance's configuration, without creating a site in it.
 
-    Both steps are the documented commands, run as subprocesses:
-    ``make_instance.py`` writes the configuration, ``zconsole run`` executes
-    ``create_content.py`` inside Zope.
+    Separate from :func:`create_site` because a networked storage has to be
+    running before Zope can open it, and for ZEO the server's own configuration
+    is one of the files this writes.
 
     :param home: Directory for the instance.
     :param storage: Storage backend, as ``make_instance.py --storage`` takes it.
-    :param env: Extra environment for both steps, such as a database DSN.
-    :returns: ``home``, now holding ``etc/zope.conf`` and ``manifest.json``.
-    :raises AssertionError: When either step fails, with its output.
+    :param options: Its flags, as ``dsn="..."`` for ``--dsn ...``.
+    :returns: ``home``.
+    :raises AssertionError: When the generator fails, with its output.
     """
-    environ = {**_plone_env(), **env, "BENCH_MANIFEST": str(home / "manifest.json")}
-    steps = [
-        [
-            sys.executable,
-            str(PLONE_DIR / "make_instance.py"),
-            str(home),
-            "--storage",
-            storage,
-            "--routes-zcml",
-            str(PLONE_DIR / "routes.zcml"),
-        ],
+    argv = [
+        sys.executable,
+        str(PLONE_DIR / "make_instance.py"),
+        str(home),
+        "--storage",
+        storage,
+        "--routes-zcml",
+        str(PLONE_DIR / "routes.zcml"),
+    ]
+    for key, value in options.items():
+        argv += [f"--{key.replace('_', '-')}", value]
+    _run_step(argv, _plone_env())
+    return home
+
+
+def create_site(home: Path) -> Path:
+    """Create the benchmark site in a configured instance.
+
+    The documented command, as a subprocess: ``zconsole run`` executes
+    ``create_content.py`` inside Zope.
+
+    :param home: Instance directory, its storage reachable.
+    :returns: ``home``, now holding ``manifest.json``.
+    :raises AssertionError: When the step fails, with its output.
+    """
+    environ = {**_plone_env(), "BENCH_MANIFEST": str(home / "manifest.json")}
+    _run_step(
         [
             str(Path(sys.executable).parent / "zconsole"),
             "run",
             str(home / "etc" / "zope.conf"),
             str(PLONE_DIR / "create_content.py"),
         ],
-    ]
-    for argv in steps:
-        result = subprocess.run(  # noqa: S603
-            argv, capture_output=True, text=True, env=environ, cwd=ROOT, check=False
-        )
-        assert result.returncode == 0, (
-            f"{' '.join(argv)} failed:\n{result.stdout}\n{result.stderr}"
-        )
+        environ,
+    )
     return home
+
+
+def _run_step(argv: list[str], env: dict[str, str]) -> None:
+    """Run one setup command, failing with its output.
+
+    :param argv: The command.
+    :param env: Its environment.
+    :raises AssertionError: When it exits non-zero.
+    """
+    result = subprocess.run(  # noqa: S603
+        argv, capture_output=True, text=True, env=env, cwd=ROOT, check=False
+    )
+    assert result.returncode == 0, (
+        f"{' '.join(argv)} failed:\n{result.stdout}\n{result.stderr}"
+    )
+
+
+#: The starve gate's shape, shared by every Plone-backed run.
+WORKERS = 4
+PROBES = 12
+
+#: A rendered Plone page takes tens of milliseconds, not the stand-in's two;
+#: this stays far below "held until the download finishes", which is hours.
+PROBE_TIMEOUT = 10.0
+
+
+def starve_plone(adapter: str, slow_clients: int, instance: Path) -> list[dict]:
+    """Run one starve round against an instance.
+
+    :param adapter: ``ploneasgi`` or ``a2wsgi``.
+    :param slow_clients: Concurrent throttled downloads.
+    :param instance: The instance directory.
+    :returns: The baseline and loaded rows.
+    :raises AssertionError: If the run did not serve Plone.
+    """
+    rows = run_bench(
+        "starve",
+        adapter,
+        workers=WORKERS,
+        slow_clients=slow_clients,
+        probes=PROBES,
+        probe_timeout=PROBE_TIMEOUT,
+        plone_instance=instance,
+    )
+    assert {row["server"] for row in rows} == {"plone"}, (
+        "the run did not serve Plone; this would be the stand-in result again"
+    )
+    return rows
+
+
+def drop_blob_caches(home: Path) -> None:
+    """Empty the instance's local blob caches, so the next read fetches.
+
+    Creating the site leaves the blob in the cache, because the process that
+    commits it writes it there; without this every networked storage would be
+    measured as a local file.
+
+    :param home: Instance directory; its server must not be running.
+    """
+    for cache in ("blobcache", "blobtemp"):
+        shutil.rmtree(home / "var" / cache, ignore_errors=True)
+
+
+def build_plone_instance(home: Path) -> Path:
+    """Generate a FileStorage instance and create the benchmark site in it.
+
+    :param home: Directory for the instance.
+    :returns: ``home``, now holding ``etc/zope.conf`` and ``manifest.json``.
+    :raises AssertionError: When either step fails, with its output.
+    """
+    return create_site(write_plone_instance(home))
+
+
+#: Credentials of the throwaway PostgreSQL; it listens on loopback only.
+PG_USER = "zodb"
+PG_IMAGE = "postgres:17"
+
+
+@contextmanager
+def postgres() -> Iterator[str]:
+    """A PostgreSQL server for the duration of a block.
+
+    ``BENCH_PG_DSN`` names an existing server and is used as is. Otherwise a
+    throwaway container is started on a free loopback port and removed
+    afterwards, whatever happens in between.
+
+    :returns: A DSN for the server's maintenance database, with the right to
+        create databases.
+    :raises AssertionError: When the container cannot start or never answers.
+    """
+    import psycopg
+
+    if existing := os.environ.get("BENCH_PG_DSN"):
+        yield existing
+        return
+
+    docker = shutil.which("docker")
+    assert docker, "Docker not found: install it, or set BENCH_PG_DSN to a server"
+    port = free_port()
+    name = f"ploneasgi-bench-pg-{port}"
+    started = subprocess.run(  # noqa: S603
+        [
+            docker,
+            "run",
+            "--detach",
+            "--rm",
+            "--name",
+            name,
+            "--env",
+            f"POSTGRES_USER={PG_USER}",
+            "--env",
+            f"POSTGRES_PASSWORD={PG_USER}",
+            "--publish",
+            f"127.0.0.1:{port}:5432",
+            PG_IMAGE,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert started.returncode == 0, f"docker run failed:\n{started.stderr}"
+    dsn = (
+        f"host=127.0.0.1 port={port} user={PG_USER} password={PG_USER} dbname=postgres"
+    )
+    try:
+        # The image's init step runs a temporary server on the Unix socket
+        # only, so a TCP connection succeeding means the real one is up.
+        deadline = time.monotonic() + READY_TIMEOUT
+        while True:
+            try:
+                psycopg.connect(dsn, connect_timeout=2).close()
+                break
+            except psycopg.OperationalError as exc:
+                assert time.monotonic() < deadline, f"postgres never answered: {exc}"
+                time.sleep(0.5)
+        yield dsn
+    finally:
+        subprocess.run(  # noqa: S603
+            [docker, "rm", "--force", name], capture_output=True, check=False
+        )
+
+
+def fresh_database(admin_dsn: str, name: str) -> str:
+    """Drop and recreate one database, so a storage starts empty.
+
+    :param admin_dsn: DSN with the right to create databases.
+    :param name: Database name; an identifier, never user input.
+    :returns: A DSN for the new database.
+    """
+    import psycopg
+
+    from psycopg import sql
+    from psycopg.conninfo import make_conninfo
+
+    with psycopg.connect(admin_dsn, autocommit=True) as conn:
+        conn.execute(sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(name)))
+        conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    return make_conninfo(admin_dsn, dbname=name)
+
+
+@contextmanager
+def zeo_server(home: Path, address: str) -> Iterator[None]:
+    """Run the instance's ZEO server for the duration of a block.
+
+    :param home: Instance directory holding ``etc/zeo.conf``.
+    :param address: The ``host:port`` that file binds.
+    :raises AssertionError: When the server exits or never listens.
+    """
+    host, port = address.split(":")
+    log = home / "var" / "zeo.log"
+    with log.open("w") as output:
+        process = subprocess.Popen(  # noqa: S603
+            [
+                str(Path(sys.executable).parent / "runzeo"),
+                "-C",
+                str(home / "etc" / "zeo.conf"),
+            ],
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            cwd=ROOT,
+        )
+        try:
+            deadline = time.monotonic() + READY_TIMEOUT
+            while True:
+                assert process.poll() is None, f"runzeo exited:\n{log.read_text()}"
+                assert time.monotonic() < deadline, f"no ZEO:\n{log.read_text()}"
+                try:
+                    socket.create_connection((host, int(port)), timeout=1).close()
+                    break
+                except OSError:
+                    time.sleep(0.2)
+            yield
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=15)
 
 
 @contextmanager

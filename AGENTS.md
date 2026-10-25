@@ -55,7 +55,8 @@ ploneasgi/
 ├── tests/             # 112 tests, none of which need Plone
 │   ├── plone/         # 41 more that do — skipped when Plone is absent
 │   └── bench/         # live-server gates — deselected by default:
-│                      #   3 `bench` (stand-in app), 11 `bench_plone` (real Plone)
+│                      #   3 `bench` (stand-in app), 11 `bench_plone` (real Plone),
+│                      #   9 `bench_storage` (ZEO, RelStorage, PGJsonb × 3)
 ├── benchmarks/
 │   ├── bench_adapter.py  # serves /page and /download under either adapter
 │   ├── driver.py         # generates load: starve / throughput / capacity
@@ -104,6 +105,7 @@ make test-no-plone   # asserts Plone is absent, then runs the 112
 make test-plone      # asserts Plone is present, then runs the 41
 make bench-test      # asserts the starvation claim; needs a live server
 make bench-plone     # the same claim and the live checks, on a real instance
+make bench-storage   # the claim on ZEO, RelStorage, PGJsonb; needs Docker
 make bench-compare   # interleaved ploneasgi vs a2wsgi throughput
 make lint            # read-only — safe for CI
 make format          # the writing one
@@ -237,9 +239,14 @@ for asserting one is higher than usual.
   serves it, but no unit test covers it.
 - `run_authenticated(limiter=...)` is plumbed but nothing passes it, so native
   routes draw on anyio's default thread pool rather than the ZODB pool budget.
-- ZEO, RelStorage and PGJsonb untested; only local blobstorage. PGJsonb is the
-  one that matters most: its blobs live in PostgreSQL or S3 behind a cache, so
-  there is no local blob file to stream from.
+- PGJsonb's S3 tier is untested (it would need MinIO); its PostgreSQL `bytea`
+  blobs are covered by `make bench-storage`. ZEO and RelStorage run with
+  unshared blob directories only.
+- On a networked storage the first read of a blob is fetched *in the worker
+  thread*, while ZODB unghosts the `Blob` — 3.7 s for 50 MB on RelStorage, one
+  laptop. The claim holds (that is work, not transfer), but a burst of cold
+  large downloads can occupy every worker. Nothing in the adapter can move it:
+  it happens inside the WSGI call.
 - POSIX only, for the unlink-safety argument in the adapter.
 
 ---

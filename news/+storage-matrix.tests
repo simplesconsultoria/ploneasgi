@@ -1,0 +1,1 @@
+Added `make bench-storage`, which runs the Plone starvation gate on ZEO, RelStorage and PGJsonb with cold blob caches, starting PostgreSQL in Docker or using `BENCH_PG_DSN`. @ericof
