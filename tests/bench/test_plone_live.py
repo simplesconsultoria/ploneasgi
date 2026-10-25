@@ -15,6 +15,8 @@ from . import fetch
 
 import json
 import pytest
+import socket
+import time
 
 
 pytestmark = pytest.mark.bench_plone
@@ -65,6 +67,38 @@ class TestZopeTraffic:
         )
         assert status == 302
         assert "require_login" in headers["location"]
+
+    def test_an_abandoned_download_stops_and_is_logged(self, live, manifest):
+        """A client that leaves mid-download ends the stream, visibly.
+
+        Checked over a real socket because the unit tests can only fake the
+        part that matters: that uvicorn actually delivers ``http.disconnect``
+        while the adapter is streaming. Before the adapter watched for it, this
+        line read as a complete 200 for the full 50 MB.
+        """
+        base, log = live
+        host, port = base.removeprefix("http://").split(":")
+        path = manifest["download"]["path"] + "/@@download/file"
+        with socket.create_connection((host, int(port)), timeout=30) as sock:
+            # A small receive buffer, so the server cannot push the whole body
+            # into kernel buffers before the close is noticed.
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 * 1024)
+            sock.sendall(f"GET {path} HTTP/1.1\r\nHost: {host}\r\n\r\n".encode())
+            assert sock.recv(64 * 1024).startswith(b"HTTP/1.1 200")
+
+        deadline = time.monotonic() + 10
+        lines: list[str] = []
+        while time.monotonic() < deadline:
+            lines = [
+                line for line in log.read_text().splitlines() if f"GET {path} " in line
+            ]
+            if any("incomplete=client-gone" in line for line in lines):
+                break
+            time.sleep(0.2)
+        aborted = [line for line in lines if "incomplete=client-gone" in line]
+        assert aborted, lines
+        sent = int(aborted[-1].split('" 200 ')[1].split()[0])
+        assert sent < manifest["download"]["size"]
 
 
 class TestNativeRoutes:

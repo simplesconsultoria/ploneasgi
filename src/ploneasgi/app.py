@@ -50,11 +50,15 @@ def default_adapter(
     """Wrap a WSGI app in this package's adapter.
 
     :param wsgi_app: The WSGI application to mount.
-    :param settings: Settings providing concurrency and chunk size.
+    :param settings: Settings providing concurrency, chunk size and the
+        request body limit.
     :returns: The configured adapter.
     """
     return WSGIMiddleware(
-        wsgi_app, workers=settings.concurrency, chunk_size=settings.chunk_size
+        wsgi_app,
+        workers=settings.concurrency,
+        chunk_size=settings.chunk_size,
+        max_body_size=settings.max_body_size or None,
     )
 
 
@@ -101,7 +105,8 @@ def create_app(
         adapter = default_adapter
 
     # Mount last: it matches everything.
-    all_routes.append(Mount("/", adapter(wsgi_app, settings)))
+    mounted = adapter(wsgi_app, settings)
+    all_routes.append(Mount("/", mounted))
 
     all_middleware = list(middleware)
 
@@ -124,11 +129,18 @@ def create_app(
         # WSGI-layer log cannot see at all.
         all_middleware.insert(0, Middleware(AccessLogMiddleware))
 
-    return Starlette(
+    app = Starlette(
         routes=all_routes,
         middleware=all_middleware,
         lifespan=_compose_lifespans([zope_lifespan, *lifespans]),
     )
+    # Native routes reach Zope through run_authenticated, which takes its
+    # limiter from here. Sharing the adapter's keeps every thread that holds a
+    # ZODB connection — WSGI call or native route — inside one budget, the one
+    # check_concurrency_contract compares with the pool size. An adapter
+    # without one (a2wsgi) leaves native routes on anyio's default pool.
+    app.state.zodb_limiter = getattr(mounted, "app_limiter", None)
+    return app
 
 
 def _compose_lifespans(factories: Sequence[LifespanFactory]) -> LifespanFactory:

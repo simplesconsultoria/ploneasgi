@@ -9,7 +9,11 @@ fixtures only: the Zope-free tests drive the raw protocol, and each module
 starts from the same scope.
 """
 
+from collections.abc import Awaitable
+from collections.abc import Callable
 from typing import Any
+
+import asyncio
 
 
 def asgi_scope(path: str = "/", *, scope_type: str = "http", **overrides: Any) -> dict:
@@ -39,3 +43,25 @@ def asgi_scope(path: str = "/", *, scope_type: str = "http", **overrides: Any) -
         scope["method"] = "GET"
     scope.update(overrides)
     return scope
+
+
+def receiver(*messages: dict) -> Callable[[], Awaitable[dict]]:
+    """Build an ASGI ``receive`` that delivers ``messages``, then waits.
+
+    Waiting is what a server does once the request body is drained: the next
+    message is ``http.disconnect``, and it arrives only when the client goes.
+    A fake that raises or returns early instead would read as a disconnect to
+    anything watching for one.
+
+    :param messages: The messages to deliver, in order.
+    :returns: The ``receive`` callable.
+    """
+    inbox = list(messages)
+
+    async def receive() -> dict:
+        if inbox:
+            return inbox.pop(0)
+        await asyncio.Event().wait()  # never set: only cancellation ends it
+        raise AssertionError("unreachable")
+
+    return receive

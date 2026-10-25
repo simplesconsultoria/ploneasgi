@@ -9,6 +9,7 @@ stream is marked incomplete, that a websocket session produces a line at all.
 from . import asgi_scope
 from ploneasgi.accesslog import AccessLogMiddleware
 from ploneasgi.accesslog import USER_KEY
+from ploneasgi.wsgi import DISCONNECTED_KEY
 
 import asyncio
 import logging
@@ -194,13 +195,7 @@ def test_counts_bytes_across_multiple_chunks():
 
 
 def test_marks_a_response_the_application_truncated():
-    """No final body event means the application stopped emitting early.
-
-    Note what this does *not* cover: a client that walks away mid-download.
-    uvicorn discards chunks after a disconnect without raising, so the app keeps
-    emitting and the response still looks complete here. Verified against a real
-    server 2026-08-03 — an aborted 50 MB download logged as a clean 200.
-    """
+    """No final body event, and no disconnect: the application stopped early."""
 
     async def app(scope, receive, send):
         await send({"type": "http.response.start", "status": 200, "headers": []})
@@ -213,6 +208,34 @@ def test_marks_a_response_the_application_truncated():
     line = run(app, scope_for())[0]
     assert "incomplete=truncated" in line
     assert " 200 7 " in line
+
+
+def test_marks_a_response_the_client_abandoned():
+    """The adapter flags a disconnect it noticed while streaming.
+
+    Without that flag a walked-away client was invisible here: uvicorn discards
+    chunks after a disconnect without raising. Verified against a real server
+    2026-08-03 — an aborted 50 MB download logged as a clean 200.
+    """
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"part", "more_body": True})
+        scope[DISCONNECTED_KEY] = True
+
+    line = run(app, scope_for())[0]
+    assert line.endswith("incomplete=client-gone")
+    assert " 200 4 " in line
+
+
+def test_a_disconnect_after_a_complete_response_is_not_noted():
+    """Every connection ends; only one that ends early is worth a note."""
+
+    async def app(scope, receive, send):
+        await hello(scope, receive, send)
+        scope[DISCONNECTED_KEY] = True
+
+    assert "incomplete" not in run(app, scope_for())[0]
 
 
 def test_completed_requests_carry_no_note():

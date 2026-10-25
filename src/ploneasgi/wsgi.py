@@ -72,9 +72,25 @@ CHUNK_SIZE = 256 * 1024
 #: Request bodies larger than this spill to a temporary file instead of RAM.
 SPOOL_MAX_SIZE = 512 * 1024
 
+#: Largest request body accepted, in bytes; larger ones get a 413. waitress's
+#: ``max_request_body_size`` default, so moving off waitress changes nothing.
+MAX_BODY_SIZE = 1024 * 1024 * 1024
+
+#: Set to ``True`` on the ASGI scope when the client went away mid-response,
+#: so the access log can say so instead of reporting a truncated response.
+DISCONNECTED_KEY = "ploneasgi.disconnected"
+
 #: Returned by :func:`_next` when an iterator is exhausted. ``None`` cannot be
 #: used: a WSGI app is allowed to yield empty chunks.
 _EXHAUSTED = object()
+
+
+class _BodyTooLarge(Exception):
+    """The request body is larger than the adapter accepts."""
+
+
+class _ClientGone(Exception):
+    """The client disconnected before its request body arrived."""
 
 
 class _StartResponse:
@@ -92,6 +108,9 @@ class _StartResponse:
         #: Chunks written through the legacy ``write()`` callable, which
         #: predates returning an iterable and which some old code still uses.
         self.written: list[bytes] = []
+        #: Whether the status line has gone to the client. Set by the adapter;
+        #: after this, the status can no longer be replaced.
+        self.headers_sent = False
 
     def __call__(
         self,
@@ -105,7 +124,15 @@ class _StartResponse:
         :param response_headers: Header name/value pairs.
         :param exc_info: Exception info when re-starting a failed response.
         :returns: The legacy ``write`` callable.
+        :raises BaseException: The exception in ``exc_info``, when the headers
+            have already been sent and the response cannot be replaced.
         """
+        if exc_info is not None and self.headers_sent:
+            # PEP 3333: "if exc_info is provided, and the HTTP headers have
+            # already been sent, start_response must raise an error, and should
+            # re-raise using the exc_info tuple." Swallowing it would let the
+            # app believe it had replaced a response the client already has.
+            raise exc_info[1].with_traceback(exc_info[2])
         self.exc_info = exc_info
         # A second call with exc_info replaces the first, which is exactly what
         # PEP 3333 asks for when the app hits an error before sending anything.
@@ -217,6 +244,7 @@ class WSGIMiddleware:
         io_workers: int | None = None,
         chunk_size: int = CHUNK_SIZE,
         spool_max_size: int = SPOOL_MAX_SIZE,
+        max_body_size: int | None = MAX_BODY_SIZE,
     ) -> None:
         """
         :param app: The WSGI application to mount.
@@ -225,10 +253,13 @@ class WSGIMiddleware:
             ``max(4 * workers, 16)``.
         :param chunk_size: Bytes to pull per thread hop from a streaming body.
         :param spool_max_size: Request body size above which to spill to disk.
+        :param max_body_size: Largest request body accepted; ``None`` for no
+            limit. Larger bodies are refused with a 413 before the app runs.
         """
         self.app = app
         self.chunk_size = chunk_size
         self.spool_max_size = spool_max_size
+        self.max_body_size = max_body_size
         self.app_limiter = anyio.CapacityLimiter(workers)
         self.io_limiter = anyio.CapacityLimiter(io_workers or max(4 * workers, 16))
 
@@ -262,28 +293,49 @@ class WSGIMiddleware:
                 await send({"type": "lifespan.shutdown.complete"})
                 return
 
-    async def _read_body(self, receive: Receive) -> Any:
+    async def _read_body(self, scope: Scope, receive: Receive) -> Any:
         """Drain the request body into a seekable file-like object.
 
         The whole body is read before the WSGI app is called. a2wsgi instead
         streams it lazily, at the cost of a blocking round trip to the event loop
         every time the app reads — the very thing this adapter removes. The
         trade is that a large upload is buffered; it spills to disk past
-        ``spool_max_size`` so that memory stays bounded.
+        ``spool_max_size`` so that memory stays bounded, and is refused past
+        ``max_body_size`` so that the disk does too.
 
+        :param scope: The ASGI connection scope, for ``Content-Length``.
         :param receive: The ASGI receive callable.
         :returns: A file-like object positioned at the start of the body.
+        :raises _BodyTooLarge: When the body exceeds ``max_body_size`` —
+            declared, or actually received, since chunked uploads declare
+            nothing.
+        :raises _ClientGone: When the client disconnects mid-body. The app is
+            never called with a truncated body: an upload cut short would
+            otherwise be processed as if it were complete.
         """
+        limit = self.max_body_size
+        if limit is not None and _declared_length(scope) > limit:
+            raise _BodyTooLarge
+
         # Not a context manager: the file outlives this call as the environ's
         # ``wsgi.input`` and is closed by _handle_http once the app has returned.
         body = SpooledTemporaryFile(max_size=self.spool_max_size)  # noqa: SIM115
+        received = 0
         more_body = True
-        while more_body:
-            message = await receive()
-            if message["type"] == "http.disconnect":
-                break
-            body.write(message.get("body", b""))
-            more_body = message.get("more_body", False)
+        try:
+            while more_body:
+                message = await receive()
+                if message["type"] == "http.disconnect":
+                    raise _ClientGone
+                chunk = message.get("body", b"")
+                received += len(chunk)
+                if limit is not None and received > limit:
+                    raise _BodyTooLarge
+                body.write(chunk)
+                more_body = message.get("more_body", False)
+        except BaseException:
+            body.close()
+            raise
         body.seek(0)
         return body
 
@@ -308,7 +360,15 @@ class WSGIMiddleware:
         :param receive: The ASGI receive callable.
         :param send: The ASGI send callable.
         """
-        body_file = await self._read_body(receive)
+        try:
+            body_file = await self._read_body(scope, receive)
+        except _BodyTooLarge:
+            await _send_error(send, 413, b"Request Entity Too Large", close=True)
+            return
+        except _ClientGone:
+            logger.debug("client disconnected before its request body arrived")
+            return
+
         environ = build_environ(scope, body_file)
         start_response = _StartResponse()
 
@@ -317,15 +377,37 @@ class WSGIMiddleware:
                 self._call_app, environ, start_response, limiter=self.app_limiter
             )
         except Exception:
+            # Nothing has reached the client yet — the start event is sent only
+            # after the app returns — so a 500 is always possible here, whether
+            # or not the app had called start_response before raising.
             logger.exception("WSGI application raised")
-            if not start_response.resolved:
-                await _send_error(send)
+            await _send_error(send)
             return
         finally:
             body_file.close()
 
         try:
-            await self._send_response(result, start_response, send)
+            # The body streams while a watcher waits on `receive`: once the
+            # request body is drained, the next message a server delivers is
+            # http.disconnect. Without the watcher an abandoned download is read
+            # to EOF, a thread hop per chunk, for a client that is gone.
+            error: Exception | None = None
+            async with anyio.create_task_group() as group:
+                watched = group.cancel_scope
+                group.start_soon(_cancel_on_disconnect, scope, receive, watched)
+                try:
+                    await self._send_response(result, start_response, send)
+                except Exception as exc:
+                    # Held and re-raised below, so it leaves with its own type
+                    # rather than wrapped in the task group's ExceptionGroup.
+                    error = exc
+                group.cancel_scope.cancel()
+            if error is not None:
+                # Mid-stream: the status is already out, so the only honest
+                # signal left is to abort the connection, which the server does
+                # when the exception reaches it. A clean final chunk would make
+                # a truncated body look complete.
+                raise error
         finally:
             close = getattr(result, "close", None)
             if close is not None:
@@ -358,9 +440,15 @@ class WSGIMiddleware:
             # PEP 3333 lets an app defer start_response until it yields its first
             # non-empty chunk, so pull one to force the call before any header
             # can be sent. It is held back and sent after the start event.
-            pending = await anyio.to_thread.run_sync(
-                _next, body, limiter=self.io_limiter
-            )
+            try:
+                pending = await anyio.to_thread.run_sync(
+                    _next, body, limiter=self.io_limiter
+                )
+            except Exception:
+                # Still before the start event, so a 500 is still possible.
+                logger.exception("WSGI application raised producing its first chunk")
+                await _send_error(send)
+                return
             if not start_response.resolved:
                 logger.error("WSGI application never called start_response")
                 await _send_error(send)
@@ -438,12 +526,52 @@ def _prelude(
     return iter(result)
 
 
+def _declared_length(scope: Scope) -> int:
+    """Read the request's ``Content-Length``.
+
+    :param scope: The ASGI connection scope.
+    :returns: The declared length, or ``0`` when absent or malformed — in
+        which case the received byte count is what the limit is checked
+        against.
+    """
+    for name, value in scope.get("headers", []):
+        if name == b"content-length":
+            try:
+                return int(value)
+            except ValueError:
+                return 0
+    return 0
+
+
+async def _cancel_on_disconnect(
+    scope: Scope, receive: Receive, cancel_scope: anyio.CancelScope
+) -> None:
+    """Cancel the response being streamed once the client disconnects.
+
+    Started only after the request body has been drained, so ``receive`` has
+    nothing left to deliver but the disconnect. Waiting on it holds no thread.
+
+    :param scope: The ASGI connection scope; marked with
+        :data:`DISCONNECTED_KEY` for the access log.
+    :param receive: The ASGI receive callable.
+    :param cancel_scope: The scope the response is streamed in.
+    """
+    while True:
+        message = await receive()
+        if message["type"] == "http.disconnect":
+            scope[DISCONNECTED_KEY] = True
+            logger.debug("client disconnected; stopped streaming %s", scope["path"])
+            cancel_scope.cancel()
+            return
+
+
 async def _send_start(send: Send, start_response: _StartResponse) -> None:
     """Send the response start event.
 
     :param send: The ASGI send callable.
     :param start_response: The resolved ``start_response`` capture object.
     """
+    start_response.headers_sent = True
     await send({
         "type": "http.response.start",
         "status": start_response.status,
@@ -451,18 +579,24 @@ async def _send_start(send: Send, start_response: _StartResponse) -> None:
     })
 
 
-async def _send_error(send: Send) -> None:
-    """Send a bare 500, for failures before any header reached the client.
+async def _send_error(
+    send: Send,
+    status: int = 500,
+    body: bytes = b"Internal Server Error",
+    *,
+    close: bool = False,
+) -> None:
+    """Send a bare error, for failures before any header reached the client.
 
     :param send: The ASGI send callable.
+    :param status: The status code.
+    :param body: The plain-text body.
+    :param close: Ask for the connection to be closed — after a refused
+        upload, whose unread remainder would otherwise be parsed as the next
+        request.
     """
-    await send({
-        "type": "http.response.start",
-        "status": 500,
-        "headers": [(b"content-type", b"text/plain; charset=utf-8")],
-    })
-    await send({
-        "type": "http.response.body",
-        "body": b"Internal Server Error",
-        "more_body": False,
-    })
+    headers = [(b"content-type", b"text/plain; charset=utf-8")]
+    if close:
+        headers.append((b"connection", b"close"))
+    await send({"type": "http.response.start", "status": status, "headers": headers})
+    await send({"type": "http.response.body", "body": body, "more_body": False})

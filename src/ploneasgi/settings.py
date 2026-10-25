@@ -69,6 +69,9 @@ class Settings:
     #: VirtualHostMonster rewrite — direct access, i.e. development. Behind a
     #: proxy the rewrite is authoritative and this is unused.
     site_id: str = "Plone"
+    #: Largest request body accepted, in bytes; larger ones get a 413 before
+    #: Zope runs. waitress's default. ``0`` disables the limit.
+    max_body_size: int = 1024 * 1024 * 1024
 
     @classmethod
     def from_env(cls, base: Path | None = None) -> Settings:
@@ -92,6 +95,9 @@ class Settings:
             chunk_size=int(os.environ.get("PLONE_BLOB_CHUNK_SIZE", 256 * 1024)),
             route_prefix=os.environ.get("PLONE_ROUTE_PREFIX", DEFAULT_PREFIX),
             site_id=os.environ.get("PLONE_SITE_ID", "Plone"),
+            max_body_size=int(
+                os.environ.get("PLONE_MAX_REQUEST_BODY_SIZE", 1024 * 1024 * 1024)
+            ),
         )
 
 
