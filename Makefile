@@ -167,3 +167,33 @@ bench-test: install-bench ## Run the benchmark assertions
 	  assert u.find_spec('a2wsgi'), 'a2wsgi missing: the falsifier arm cannot run'; \
 	  print('  a2wsgi present: the comparison is falsifiable')"
 	@uv run pytest tests/bench -m bench
+
+# The same claim with Zope as the app, plus the checks that need a running
+# instance. Plone and a2wsgi both have to be present: one is the app, the other
+# the falsifier.
+.PHONY: bench-plone
+bench-plone: install-plone install-bench ## Run the starvation gate and live checks against real Plone
+	@echo "$(GREEN)==> Plone-backed benchmark gate$(RESET)"
+	@uv run python -c "import importlib.util as u; \
+	  missing = [p for p in ('Products.CMFPlone', 'a2wsgi') if not u.find_spec(p)]; \
+	  assert not missing, f'not installed: {missing}'; \
+	  print('  Plone and a2wsgi: present')"
+	@uv run pytest tests/bench -m bench_plone
+
+.PHONY: install-storage
+install-storage: ## Install the networked storages (ZEO, RelStorage, PGJsonb)
+	@echo "$(GREEN)==> Installing storage backends$(RESET)"
+	@uv sync --inexact --group bench-storage --group test
+
+# The same gate on every networked storage, each of which fetches a blob into a
+# local cache on first read. PostgreSQL comes from a throwaway Docker container,
+# or from BENCH_PG_DSN when that names a server.
+.PHONY: bench-storage
+bench-storage: install-plone install-bench install-storage ## Run the Plone gate on ZEO, RelStorage and PGJsonb
+	@echo "$(GREEN)==> Storage matrix$(RESET)"
+	@uv run python -c "import importlib.util as u; \
+	  missing = [p for p in ('Products.CMFPlone', 'a2wsgi', 'ZEO', 'relstorage', \
+	                         'psycopg2', 'zodb_pgjsonb') if not u.find_spec(p)]; \
+	  assert not missing, f'not installed: {missing}'; \
+	  print('  Plone, a2wsgi and the three storages: present')"
+	@uv run pytest tests/bench -m bench_storage

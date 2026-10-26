@@ -1,0 +1,1 @@
+Added `make bench-plone`, which runs the starvation gate against a generated Plone instance and checks VirtualHostMonster rewrites, streamed downloads and the ZCML route guard on a running server. @ericof

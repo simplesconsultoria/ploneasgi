@@ -17,7 +17,9 @@ from ploneasgi.context import NotAuthenticated
 from ploneasgi.context import PloneContext
 from ploneasgi.context import run_authenticated
 from ploneasgi.context import SiteNotFound
+from types import SimpleNamespace
 
+import anyio
 import asyncio
 import pytest
 
@@ -72,6 +74,38 @@ class TestWorkerThreadSeesTheTestDatabase:
             ws_scope(), lambda ctx: threading.get_ident(), db=db, site_id=site_id
         )
         assert worker != caller
+
+
+class TestZodbLimiter:
+    """Native routes draw on the same budget as WSGI requests."""
+
+    def test_the_applications_limiter_bounds_the_call(self, db, site_id):
+        limiter = anyio.CapacityLimiter(1)
+        app = SimpleNamespace(state=SimpleNamespace(zodb_limiter=limiter))
+        scope = asgi_scope("/ws", scope_type="websocket", app=app)
+
+        held = run(scope, lambda ctx: limiter.borrowed_tokens, db=db, site_id=site_id)
+
+        assert held == 1
+        assert limiter.borrowed_tokens == 0
+
+    def test_an_explicit_limiter_wins(self, db, site_id):
+        published = anyio.CapacityLimiter(1)
+        explicit = anyio.CapacityLimiter(1)
+        app = SimpleNamespace(state=SimpleNamespace(zodb_limiter=published))
+        scope = asgi_scope("/ws", scope_type="websocket", app=app)
+
+        held = asyncio.run(
+            run_authenticated(
+                scope,
+                lambda ctx: (published.borrowed_tokens, explicit.borrowed_tokens),
+                site_id=site_id,
+                db=db,
+                limiter=explicit,
+            )
+        )
+
+        assert held == (0, 1)
 
 
 class TestAuthentication:

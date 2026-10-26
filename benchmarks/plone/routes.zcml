@@ -1,0 +1,21 @@
+<configure xmlns:ploneasgi="http://namespaces.plone.org/ploneasgi">
+
+  <!-- Two guards on one handler: one any visitor passes, one only a Manager
+       does. The live checks need both sides of the permission boundary. -->
+  <ploneasgi:route
+      handler="endpoints.whoami"
+      name="whoami"
+      path="/whoami"
+      permission="zope2.View"
+      site="Plone"
+      />
+
+  <ploneasgi:route
+      handler="endpoints.whoami"
+      name="whoami-manager"
+      path="/whoami-manager"
+      permission="cmf.ManagePortal"
+      site="Plone"
+      />
+
+</configure>

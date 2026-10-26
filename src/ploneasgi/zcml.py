@@ -164,6 +164,9 @@ async def _is_allowed(scope: Any, route: ASGIRoute) -> bool:
             return False
         return ctx.check_permission(title, ctx.portal)
 
+    # Its own connection, closed before the handler runs: the handler is async
+    # and opens its own if it needs Plone. Two in sequence, never two at once,
+    # and both draw on the application's ZODB limiter (see limiter_for).
     return bool(await run_authenticated(scope, check, site_id=_site_for(scope, route)))
 
 

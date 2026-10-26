@@ -1,0 +1,1 @@
+The adapter now stops streaming a response when the client disconnects, instead of reading the body to the end, and the access log marks such a request `incomplete=client-gone`. An upload cut short by a disconnect is no longer passed to Zope. @ericof

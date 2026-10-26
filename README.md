@@ -218,6 +218,7 @@ call `routes_from_registry()` and pass the result in.
 | `PLONE_BLOB_CHUNK_SIZE` | `262144` | Bytes per thread hop when streaming. |
 | `PLONE_ROUTE_PREFIX` | `/++asgi++` | Path prefix reserved for native routes. |
 | `PLONE_SITE_ID` | `Plone` | Site entered by native routes when a request arrives with no VirtualHostMonster rewrite. Unused behind a proxy. |
+| `PLONE_MAX_REQUEST_BODY_SIZE` | `1073741824` | Largest request body accepted, in bytes; larger ones get a 413 before Zope runs. waitress's default; `0` disables it. |
 
 On the chunk size: 64 KB is what `filestream_iterator` and Starlette's
 `FileResponse` default to, but here each chunk costs a thread dispatch. Measured
@@ -230,15 +231,15 @@ itself in memory held per in-flight response.
 The suite has two halves, and they install different things.
 
 ```bash
-make install && make test        # 112 tests, no Plone in the environment
-make test-no-plone               # asserts Plone is absent, then runs those 112
-make install-plone && make test  # 153 — the above plus 41 that need a real site
-make test-plone                  # asserts Plone is present, then runs those 41
+make install && make test        # 136 tests, no Plone in the environment
+make test-no-plone               # asserts Plone is absent, then runs those 136
+make install-plone && make test  # 179 — the above plus 43 that need a real site
+make test-plone                  # asserts Plone is present, then runs those 43
 make lint                        # read-only; `make format` is the writing one
 ```
 
 Most of the package installs **no Plone at all** — `Products`, `Zope2`,
-`AccessControl` and `plone` are all absent from the environment those 112 tests
+`AccessControl` and `plone` are all absent from the environment those 136 tests
 run in. That is the load-bearing check behind the "Zope-free" claim in each
 module: it is verified by the absence of Zope, not asserted in a docstring.
 `tests/test_zopeapp.py::TestStaysZopeFree` checks the same boundary from inside
@@ -253,7 +254,7 @@ report success.
 
 ### `ploneasgi.testing`
 
-The layer behind those 41 tests ships with the package, for projects that build
+The layer behind those 43 tests ships with the package, for projects that build
 native routes of their own:
 
 ```python
@@ -300,31 +301,90 @@ Throughput on the same body, arms interleaved over 3 cycles: ploneasgi
 overlap, which is the only reason it is worth quoting at all — and it is still a
 warm-cache loopback number, not a production profile.
 
+### Against a real Plone
+
+```bash
+make bench-plone                       # the same gate, plus live checks, on Plone
+python benchmarks/run.py starve --adapter ploneasgi --plone-instance <dir>
+```
+
+The stand-in app isolates the adapter; `benchmarks/plone/` replaces it with a
+generated Zope instance (FileStorage, local blobstorage) and a classic Plone site
+holding a 50 MB published `File`. The slow clients download it through Plone's
+own `@@download/file`, and the probes ask for the site root, rendered by Zope.
+Same laptop, 4 workers:
+
+| slow clients | ploneasgi | a2wsgi |
+| -----------: | --------- | ------ |
+| 4 (= workers) | 12 / 12 | **0 / 12** |
+| 16           | 12 / 12 (p50 18.3 ms, against 17.6 unloaded) | — |
+
+The same run checks what only a running instance can show: the DEBUG log
+records that the download took the streaming branch (a `filestream` iterator
+for a body, not a materialized one), a VirtualHostMonster-rewritten page renders
+`https://` URLs, a private file redirects anonymous visitors to the login form,
+and the ZCML routes in `benchmarks/plone/routes.zcml` enforce their permission
+— a Zope *root* manager arriving through a rewrite included.
+
+### On networked storages
+
+```bash
+make bench-storage     # ZEO, RelStorage and PGJsonb; PostgreSQL via Docker
+```
+
+FileStorage serves a blob from a file that already exists. ZEO, RelStorage and
+PGJsonb do not have one: each fetches the blob into a local cache on first read,
+over the ZEO protocol or out of PostgreSQL. PGJsonb has no blob directory at
+all: with no S3 configured, every blob lives in a `bytea` column. Blob directories are
+deliberately not shared, so the fetch happens.
+
+Where that fetch runs decides whether the claim survives, so it was measured,
+not assumed. ZODB fetches while unghosting the `Blob`, inside the WSGI call, on
+a worker thread. A cold 50 MB fetch held one for, on one laptop, one run each:
+
+| storage | cold fetch, in the worker | warm |
+| ------- | ------------------------: | ---: |
+| ZEO (local server) | 0.12 s | ~0 |
+| RelStorage (PostgreSQL 17) | 3.7 s | ~0 |
+| PGJsonb (PostgreSQL 17) | 1.2 s | ~0 |
+
+That is *work*, bounded by the storage, and the worker is released before the
+transfer begins. The transfer still streams from the local cache file on the
+event loop. Every round of the gate starts with the caches emptied, and on each
+storage ploneasgi answers 12/12 page probes under 16 slow downloads while
+a2wsgi answers 0/12 under 4.
+
+What the table does mean: on RelStorage, a burst of first downloads of large,
+uncached blobs can occupy every worker for seconds. Size `workers` and the blob
+cache with that in mind.
+
 ## Known gaps
 
-- **`build_wsgi_app` is tested only up to its guard clause.** Everything past the
-  `zope.conf` check needs a generated instance, which this package does not ship.
-- **The access log's `bytes` is what the app emitted, not what the client got.**
-  uvicorn's `send` begins `if self.disconnected: return`, discarding chunks after
-  a disconnect without telling the application — so an aborted 50 MB download is
-  logged as a clean, complete 200. Catching that needs a concurrent poll of
-  `receive` for `http.disconnect`, which the middleware does not do because the
-  adapter owns `receive`. Behind a proxy, the proxy's log is authoritative on
-  delivery.
+- **`build_wsgi_app` is unit-tested only up to its guard clause.** The rest runs
+  end to end under `make bench-plone`, which generates an instance and serves it.
+- **The access log's `bytes` is an upper bound on what the client got.** The
+  adapter now watches for `http.disconnect` while it streams, stops pulling the
+  body, and the line ends in `incomplete=client-gone` — where an aborted 50 MB
+  download used to log as a clean 200. But the last chunks may still have been
+  in a socket buffer, and native routes that stream do not watch at all. Behind
+  a proxy, the proxy's log is authoritative on delivery.
 - **The access log cannot name the authenticated user** — authentication happens
   inside Zope, below the middleware. It logs `-` unless something sets
   `ploneasgi.user` on the ASGI scope, which the adapter exposes to WSGI as
   `environ["asgi.scope"]`.
 - **Request bodies are fully buffered** before the WSGI app is called, spilling to
-  disk past 512 KB. a2wsgi streams them instead, at the cost of a blocking round
-  trip per read.
-- **Only local blobstorage tested.** ZEO and RelStorage without a shared blob dir
-  fetch into a local cache first; that fetch lands in the worker thread.
-  PGJsonb keeps blobs in PostgreSQL or S3 with no local blob file at all, and
-  how it behaves here has not been measured yet.
+  disk past 512 KB and refused with a 413 past `PLONE_MAX_REQUEST_BODY_SIZE`.
+  a2wsgi streams them instead, at the cost of a blocking round trip per read.
+  An upload cut short by a disconnect never reaches Zope.
+- **PGJsonb's S3 tier is untested.** The matrix covers its PostgreSQL `bytea`
+  blobs. With S3 configured, blobs above `blob-threshold` go there instead,
+  behind the same local cache; testing that would need MinIO in the fixtures. ZEO and RelStorage are tested with unshared
+  blob directories only, which is the harder case.
 - **POSIX only** for the unlink-safety argument.
-- **`run_authenticated(limiter=...)` is plumbed but unused.** Native routes draw
-  on anyio's default thread pool rather than the ZODB pool budget.
+- **A guarded native route opens two ZODB connections per request**, one after
+  the other: the permission check, then whatever the handler does. Both go
+  through the same limiter as WSGI requests, so the pool budget holds, but it
+  is a second thread hop. Merging them would change the handler API.
 
 ## License
 

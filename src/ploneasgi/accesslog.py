@@ -35,17 +35,19 @@ film over a bad connection".
 .. warning::
    **``bytes`` is what the application emitted, not what the client received.**
    uvicorn's ``send`` begins ``if self.disconnected: return`` — after a client
-   goes away it discards every further chunk without telling the application. So
-   an aborted 50 MB download is still logged as 50 MB, and ``duration`` measures
-   how long the server spent producing bytes nobody was reading. Measured
-   2026-08-03: a rate-limited ``curl`` killed after one second produced a normal,
-   complete-looking 200 for the full size.
+   goes away it discards chunks without telling the application. Measured
+   2026-08-03, before the adapter watched for it: a rate-limited ``curl`` killed
+   after one second produced a normal, complete-looking 200 for the full 50 MB.
 
-   Detecting that would mean polling ``receive`` for ``http.disconnect``
-   concurrently with the response, which this middleware deliberately does not
-   do — the adapter owns ``receive``. ``incomplete=client-gone`` therefore fires
-   only when the *application* stops emitting early, which is a real case
-   (an exception mid-stream) but not the client-abort case.
+   :class:`ploneasgi.wsgi.WSGIMiddleware` now waits on ``receive`` while it
+   streams, stops at ``http.disconnect`` and marks the scope with
+   :data:`~ploneasgi.wsgi.DISCONNECTED_KEY`; the line then ends in
+   ``incomplete=client-gone``, and ``bytes`` is what was emitted up to the
+   moment the disconnect was noticed — still an upper bound on what arrived,
+   since the last chunks may have been sitting in a socket buffer.
+   ``incomplete=truncated`` is the other case: the application stopped
+   emitting early, typically an exception mid-stream. Native routes and other
+   apps that do not watch ``receive`` still log an aborted download as complete.
 
 .. note::
    uvicorn has its own access log, on by default. :func:`ploneasgi.app.serve`
@@ -59,6 +61,7 @@ film over a bad connection".
 from collections.abc import Callable
 from collections.abc import MutableMapping
 from datetime import datetime
+from ploneasgi.wsgi import DISCONNECTED_KEY
 from starlette.types import ASGIApp
 from starlette.types import Message
 from starlette.types import Receive
@@ -244,10 +247,13 @@ class AccessLogMiddleware:
         note = ""
         if status is None:
             note = " incomplete=no-response"
+        elif not complete and scope.get(DISCONNECTED_KEY):
+            # Checked only for an incomplete response: a disconnect noticed
+            # after the final body event is the ordinary end of a connection.
+            note = " incomplete=client-gone"
         elif not complete:
             # The application stopped emitting without a final body event —
-            # typically an exception mid-stream. Not the client-abort case,
-            # which is invisible here; see the module warning.
+            # typically an exception mid-stream.
             note = " incomplete=truncated"
 
         self._emit({

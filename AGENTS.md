@@ -52,13 +52,17 @@ ploneasgi/
 │   ├── settings.py    # environment-only configuration
 │   ├── app.py         # create_app / serve
 │   └── meta.zcml      # directive declaration
-├── tests/             # 112 tests, none of which need Plone
-│   ├── plone/         # 41 more that do — skipped when Plone is absent
-│   └── bench/         # 3 that need a live server — deselected by default
+├── tests/             # 136 tests, none of which need Plone
+│   ├── plone/         # 43 more that do — skipped when Plone is absent
+│   └── bench/         # live-server gates — deselected by default:
+│                      #   3 `bench` (stand-in app), 11 `bench_plone` (real Plone),
+│                      #   9 `bench_storage` (ZEO, RelStorage, PGJsonb × 3)
 ├── benchmarks/
 │   ├── bench_adapter.py  # serves /page and /download under either adapter
 │   ├── driver.py         # generates load: starve / throughput / capacity
-│   └── run.py            # starts the server, runs a mode, always tears down
+│   ├── run.py            # starts the server, runs a mode, always tears down
+│   └── plone/            # the same, with a generated Zope instance as the app:
+│                         #   make_instance, create_content, serve, test routes
 └── news/              # towncrier fragments
 ```
 
@@ -96,10 +100,12 @@ wrong side of the line.
 ```bash
 make install         # package + test dependencies
 make install-plone   # adds Plone and the test layer's harness
-make test            # whatever the venv supports: 112, or 153 with Plone
-make test-no-plone   # asserts Plone is absent, then runs the 112
-make test-plone      # asserts Plone is present, then runs the 41
+make test            # whatever the venv supports: 136, or 179 with Plone
+make test-no-plone   # asserts Plone is absent, then runs the 136
+make test-plone      # asserts Plone is present, then runs the 43
 make bench-test      # asserts the starvation claim; needs a live server
+make bench-plone     # the same claim and the live checks, on a real instance
+make bench-storage   # the claim on ZEO, RelStorage, PGJsonb; needs Docker
 make bench-compare   # interleaved ploneasgi vs a2wsgi throughput
 make lint            # read-only — safe for CI
 make format          # the writing one
@@ -216,8 +222,13 @@ for asserting one is higher than usual.
   registry to `create_app`. The moment one appears, PasteDeploy has been
   reinvented with extra steps.
 - Do not quote a performance delta from a single, non-interleaved run.
-- Do not claim the access log's `bytes` is what the client received — uvicorn
-  discards chunks after a disconnect without telling the application.
+- Do not claim the access log's `bytes` is what the client received. The
+  adapter stops at `http.disconnect` and marks `incomplete=client-gone`, but
+  bytes already handed to uvicorn may never have left the socket buffer.
+- Do not let a test's fake `receive` raise or return `http.disconnect` once
+  its messages run out, unless the test is about a disconnect: the adapter
+  watches `receive` while streaming. Use `tests.receiver`, which waits, as a
+  server does.
 - Do not use `unrestrictedTraverse` plus a permission check on the target. That
   skips the checks on every intermediate step, which is the shape of most
   path-traversal disclosure bugs.
@@ -228,18 +239,21 @@ for asserting one is higher than usual.
 
 ## Known gaps
 
-- CI (`.github/workflows/ci.yml`) has not run yet: it runs for the first
-  time on the first push, which is where defects in a never-run workflow show
-  up.
-- **`build_wsgi_app` is only tested up to its guard clause.** Everything past the
-  `zope.conf` check needs a generated instance, which the package does not ship.
-- `run_authenticated(limiter=...)` is plumbed but nothing passes it, so native
-  routes draw on anyio's default thread pool rather than the ZODB pool budget.
-- ZEO, RelStorage and PGJsonb untested; only local blobstorage. PGJsonb is the
-  one that matters most: its blobs live in PostgreSQL or S3 behind a cache, so
-  there is no local blob file to stream from.
-- The route guard and site resolution are tested against the functional layer
-  only, not yet against a running instance.
+- **`build_wsgi_app` is unit-tested only up to its guard clause.** The rest is
+  exercised end to end by `make bench-plone`, which generates an instance and
+  serves it, but no unit test covers it.
+- A guarded native route opens two ZODB connections in sequence (the guard,
+  then the handler's own `run_authenticated`). Both draw on the adapter's
+  `app_limiter`, published as `app.state.zodb_limiter` by `create_app`, so
+  the pool budget holds; merging them would change the handler API.
+- PGJsonb's S3 tier is untested (it would need MinIO); its PostgreSQL `bytea`
+  blobs are covered by `make bench-storage`. ZEO and RelStorage run with
+  unshared blob directories only.
+- On a networked storage the first read of a blob is fetched *in the worker
+  thread*, while ZODB unghosts the `Blob` — 3.7 s for 50 MB on RelStorage, one
+  laptop. The claim holds (that is work, not transfer), but a burst of cold
+  large downloads can occupy every worker. Nothing in the adapter can move it:
+  it happens inside the WSGI call.
 - POSIX only, for the unlink-safety argument in the adapter.
 
 ---

@@ -12,11 +12,14 @@ behaviour — the whole reason this adapter exists — can actually be asserted.
 """
 
 from . import asgi_scope
+from . import receiver
+from ploneasgi.wsgi import DISCONNECTED_KEY
 from ploneasgi.wsgi import WSGIMiddleware
 
 import asyncio
 import io
 import pytest
+import sys
 
 
 class Response:
@@ -57,11 +60,8 @@ def call(
     middleware = WSGIMiddleware(app, **kwargs)
     scope = asgi_scope(path, method=method, query_string=query, headers=headers or [])
 
-    messages = [{"type": "http.request", "body": body, "more_body": False}]
+    receive = receiver({"type": "http.request", "body": body, "more_body": False})
     response = Response()
-
-    async def receive():
-        return messages.pop(0)
 
     async def send(message):
         if message["type"] == "http.response.start":
@@ -163,10 +163,7 @@ def test_script_name_is_stripped_from_path_info():
 
     middleware = WSGIMiddleware(app)
     scope = asgi_scope("/mounted/inner", root_path="/mounted")
-    messages = [{"type": "http.request", "body": b"", "more_body": False}]
-
-    async def receive():
-        return messages.pop(0)
+    receive = receiver({"type": "http.request", "body": b"", "more_body": False})
 
     async def send(message):
         return None
@@ -358,3 +355,250 @@ def test_websocket_scope_is_refused():
     asyncio.run(middleware({"type": "websocket"}, receive, send))
 
     assert sent == [{"type": "websocket.close", "code": 1000}]
+
+
+def drive(middleware, receive, *, path: str = "/", headers=None) -> tuple:
+    """Run one request with a caller-supplied ``receive``.
+
+    :param middleware: The adapter.
+    :param receive: The ASGI receive callable.
+    :param path: Request path.
+    :param headers: Raw request headers.
+    :returns: The scope, after the call, and the collected :class:`Response`.
+    """
+    scope = asgi_scope(path, method="POST", headers=headers or [])
+    response = Response()
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            response.status = message["status"]
+            response.headers = {
+                name.decode("latin-1"): value.decode("latin-1")
+                for name, value in message["headers"]
+            }
+        elif message["type"] == "http.response.body" and message["body"]:
+            response.chunks.append(message["body"])
+
+    asyncio.run(middleware(scope, receive, send))
+    return scope, response
+
+
+class CountingStream(StreamIterator):
+    """A stream iterator that records how many chunks were pulled from it."""
+
+    def __init__(self, data: bytes) -> None:
+        """:param data: The payload to stream."""
+        super().__init__(data)
+        self.pulled = 0
+
+    def __next__(self) -> bytes:
+        """:returns: The next chunk, counted."""
+        self.pulled += 1
+        return super().__next__()
+
+
+class TestClientDisconnect:
+    def test_streaming_stops_when_the_client_goes(self):
+        """An abandoned download is not read to the end.
+
+        Before the adapter watched ``receive``, all 100 chunks were pulled —
+        a thread hop each — for a client that had left after two.
+        """
+        stream = CountingStream(b"x" * (100 * 1024))
+        gone = asyncio.Event()
+        delivered = 0
+
+        def app(environ, start_response):
+            start_response("200 OK", [("Content-Type", "application/octet-stream")])
+            return stream
+
+        async def receive():
+            if not hasattr(receive, "drained"):
+                receive.drained = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await gone.wait()
+            return {"type": "http.disconnect"}
+
+        middleware = WSGIMiddleware(app, chunk_size=1024)
+        scope = asgi_scope("/", headers=[])
+
+        async def send(message):
+            nonlocal delivered
+            if message["type"] == "http.response.body" and message["body"]:
+                delivered += 1
+                if delivered == 2:
+                    gone.set()
+
+        asyncio.run(middleware(scope, receive, send))
+
+        assert stream.pulled < 10, f"{stream.pulled} of 100 chunks pulled"
+        assert stream.closed, "the iterable must still be closed"
+        assert scope[DISCONNECTED_KEY] is True
+
+    def test_a_complete_response_is_not_marked(self):
+        def app(environ, start_response):
+            start_response("200 OK", [("Content-Type", "text/plain")])
+            return StreamIterator(b"y" * 4096)
+
+        receive = receiver({"type": "http.request", "body": b"", "more_body": False})
+        scope, response = drive(WSGIMiddleware(app), receive)
+
+        assert response.body == b"y" * 4096
+        assert DISCONNECTED_KEY not in scope
+
+    def test_a_disconnect_mid_upload_never_reaches_the_app(self):
+        """A truncated upload would otherwise be processed as complete."""
+        called = []
+
+        def app(environ, start_response):  # pragma: no cover - must not run
+            called.append(environ["wsgi.input"].read())
+            start_response("200 OK", [])
+            return [b""]
+
+        receive = receiver(
+            {"type": "http.request", "body": b"half", "more_body": True},
+            {"type": "http.disconnect"},
+        )
+        _, response = drive(WSGIMiddleware(app), receive)
+
+        assert called == []
+        assert response.status is None
+
+
+class TestRequestBodyLimit:
+    @staticmethod
+    def app(environ, start_response):
+        start_response("200 OK", [("Content-Type", "text/plain")])
+        return [str(len(environ["wsgi.input"].read())).encode()]
+
+    def test_a_declared_length_over_the_limit_is_refused_unread(self):
+        received = []
+
+        async def receive():  # pragma: no cover - must not be read
+            received.append(True)
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        _, response = drive(
+            WSGIMiddleware(self.app, max_body_size=10),
+            receive,
+            headers=[(b"content-length", b"11")],
+        )
+
+        assert response.status == 413
+        assert response.headers["connection"] == "close"
+        assert received == []
+
+    def test_an_undeclared_body_over_the_limit_is_refused(self):
+        """Chunked uploads declare nothing, so the bytes are counted."""
+        receive = receiver(
+            {"type": "http.request", "body": b"123456", "more_body": True},
+            {"type": "http.request", "body": b"789012", "more_body": False},
+        )
+        _, response = drive(WSGIMiddleware(self.app, max_body_size=10), receive)
+
+        assert response.status == 413
+
+    def test_a_body_at_the_limit_is_accepted(self):
+        receive = receiver({"type": "http.request", "body": b"x" * 10})
+        _, response = drive(
+            WSGIMiddleware(self.app, max_body_size=10),
+            receive,
+            headers=[(b"content-length", b"10")],
+        )
+
+        assert response.status == 200
+        assert response.body == b"10"
+
+    def test_none_disables_the_limit(self):
+        receive = receiver({"type": "http.request", "body": b"x" * 100})
+        _, response = drive(WSGIMiddleware(self.app, max_body_size=None), receive)
+
+        assert response.body == b"100"
+
+
+class TestErrors:
+    def test_an_error_after_start_response_still_becomes_500(self):
+        """Nothing reaches the client until the app returns, so 500 is possible.
+
+        This used to send nothing at all: the error path assumed a resolved
+        status meant the headers were already out.
+        """
+
+        def app(environ, start_response):
+            start_response("200 OK", [("Content-Type", "text/plain")])
+            raise RuntimeError("boom")
+
+        response = call(app)
+
+        assert response.status == 500
+
+    def test_an_error_producing_the_first_chunk_becomes_500(self):
+        def app(environ, start_response):
+            def generate():
+                raise RuntimeError("boom")
+                yield b""  # pragma: no cover - makes this a generator
+
+            return generate()
+
+        response = call(app)
+
+        assert response.status == 500
+
+    def test_an_error_mid_stream_propagates_with_its_own_type(self):
+        """The server aborts the connection, so the client sees a truncation.
+
+        A clean final chunk would make the truncated body look complete. It
+        leaves as the app's own exception, not an ``ExceptionGroup`` from the
+        task group the body streams in.
+        """
+
+        def app(environ, start_response):
+            def generate():
+                start_response("200 OK", [("Content-Type", "text/plain")])
+                yield b"partial"
+                raise RuntimeError("boom")
+
+            return generate()
+
+        with pytest.raises(RuntimeError, match="boom"):
+            call(app)
+
+    def test_exc_info_before_the_headers_replaces_the_status(self):
+        def app(environ, start_response):
+            start_response("200 OK", [("Content-Type", "text/plain")])
+            try:
+                raise ValueError("late")
+            except ValueError:
+                start_response(
+                    "500 Error", [("Content-Type", "text/plain")], sys.exc_info()
+                )
+            return [b"error page"]
+
+        response = call(app)
+
+        assert response.status == 500
+        assert response.body == b"error page"
+
+    def test_exc_info_after_the_headers_is_reraised(self):
+        """PEP 3333: start_response must raise, with the exc_info tuple."""
+        reraised = []
+
+        def app(environ, start_response):
+            def generate():
+                start_response("200 OK", [("Content-Type", "text/plain")])
+                yield b"first"
+                try:
+                    raise ValueError("late")
+                except ValueError:
+                    try:
+                        start_response("500 Error", [], sys.exc_info())
+                    except ValueError as exc:
+                        reraised.append(exc)
+                yield b"second"
+
+            return generate()
+
+        response = call(app)
+
+        assert [str(exc) for exc in reraised] == ["late"]
+        assert response.status == 200

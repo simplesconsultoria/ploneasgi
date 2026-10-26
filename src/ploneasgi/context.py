@@ -282,14 +282,31 @@ async def run_authenticated(
     :param db: ZODB database to use; defaults to ``Zope2.DB``. Injectable so
         tests can pass the layer's DemoStorage, which is also how the
         worker-thread-sees-the-test-database question gets answered.
-    :param limiter: Bounds concurrent calls. Pass the adapter's ``app_limiter``
-        to keep native routes inside the same ZODB pool budget as WSGI requests;
-        without it these calls contend for anyio's default pool.
+    :param limiter: Bounds concurrent calls. Defaults to the one
+        :func:`ploneasgi.app.create_app` publishes as ``app.state.zodb_limiter``
+        — the adapter's ``app_limiter`` — so native routes share the WSGI
+        requests' ZODB pool budget; with neither, anyio's default pool.
     :returns: Whatever ``work`` returns.
     """
     return await anyio.to_thread.run_sync(
-        partial(_run_sync, scope, work, site_id, db or default_db()), limiter=limiter
+        partial(_run_sync, scope, work, site_id, db or default_db()),
+        limiter=limiter if limiter is not None else limiter_for(scope),
     )
+
+
+def limiter_for(scope: Scope) -> anyio.CapacityLimiter | None:
+    """The ZODB limiter of the application serving a request.
+
+    Starlette puts the application on every scope it serves, which is how a
+    route built far from :func:`ploneasgi.app.create_app` — by the ZCML
+    directive, say — reaches the limiter without being handed it.
+
+    :param scope: The ASGI connection scope.
+    :returns: ``app.state.zodb_limiter``, or ``None`` when the scope carries no
+        application or the application has none.
+    """
+    state = getattr(scope.get("app"), "state", None)
+    return getattr(state, "zodb_limiter", None)
 
 
 def default_db() -> Any:
