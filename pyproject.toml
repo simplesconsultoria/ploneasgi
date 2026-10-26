@@ -48,6 +48,10 @@ plone = [
 testing = [
     "plone.app.testing",
     "plone.app.contenttypes",
+    # plone.app.contenttypes.testing imports it at module scope, but declares it
+    # only in its own `test` extra. Without it here, `ploneasgi.testing` fails
+    # to import wherever pytest-plone is not also installed.
+    "plone.app.robotframework",
 ]
 
 [project.urls]

@@ -2618,6 +2618,7 @@ plone = [
 ]
 testing = [
     { name = "plone-app-contenttypes" },
+    { name = "plone-app-robotframework" },
     { name = "plone-app-testing" },
 ]
 
@@ -2643,6 +2644,7 @@ requires-dist = [
     { name = "anyio" },
     { name = "httptools" },
     { name = "plone-app-contenttypes", marker = "extra == 'testing'" },
+    { name = "plone-app-robotframework", marker = "extra == 'testing'" },
     { name = "plone-app-testing", marker = "extra == 'testing'" },
     { name = "products-cmfplone", marker = "extra == 'plone'" },
     { name = "python-dotenv" },
