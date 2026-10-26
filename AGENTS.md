@@ -63,6 +63,9 @@ ploneasgi/
 │   ├── run.py            # starts the server, runs a mode, always tears down
 │   └── plone/            # the same, with a generated Zope instance as the app:
 │                         #   make_instance, create_content, serve, test routes
+├── docs/              # Sphinx + MyST documentation, its own uv project
+│   ├── docs/          #   sources: tutorials, how-to-guides, concepts, reference
+│   └── styles/        #   Vale config; project terms in config/vocabularies/Base
 └── news/              # towncrier fragments
 ```
 
@@ -111,10 +114,30 @@ make lint            # read-only — safe for CI
 make format          # the writing one
 make changelog       # preview the towncrier draft
 make build           # sdist + wheel
+make docs-install    # the documentation toolchain, in docs/.venv
+make docs-html       # build the docs into docs/_build/html
+make docs-vale       # style check; fails on warnings, as CI does
+make docs-linkcheck  # broken links
 ```
 
 `make lint` passes `--no-fix` on purpose: the ruff config sets `fix = true`, so
 plain `ruff check` rewrites the tree. A check target must never modify files.
+
+---
+
+## Documentation
+
+The docs follow Diátaxis and the Plone documentation style: one sentence per
+line, `html_meta` front matter, a label, one H1, and a closing "Related"
+section. Reference pages describe only, and carry a `<!-- source: … -->`
+comment naming the code they describe; when that code changes, the page changes
+in the same commit. The API pages are pure `automodule`, so docstrings are
+documentation — keep them reStructuredText.
+
+Every command, output and URL in the tutorial was run against a fresh project.
+Re-run it when the server script, the directive or the install line changes.
+`.github/workflows/docs.yml` builds on every pull request and deploys `main` to
+GitHub Pages.
 
 ---
 
