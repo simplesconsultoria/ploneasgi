@@ -55,9 +55,13 @@ class Layer(PloneSandboxLayer):
         self.loadZCML("meta.zcml", package=ploneasgi)
 
 
+#: The shared fixture: a Plone site with ``plone.app.contenttypes`` and the
+#: route directive's ``meta.zcml``. Base your own layers on it.
 PLONEASGI_FIXTURE = Layer()
 
 
+#: Single-threaded tests only. Aborts between tests, so a connection opened
+#: from another thread sees an empty site.
 INTEGRATION_TESTING = IntegrationTesting(
     bases=(PLONEASGI_FIXTURE,),
     name="PloneasgiLayer:IntegrationTesting",
@@ -67,6 +71,8 @@ INTEGRATION_TESTING = IntegrationTesting(
 # WSGI_SERVER_FIXTURE is included because the Plone-facing paths here have
 # already been caught passing under unit tests while failing against a real
 # server; a layer that cannot be driven over HTTP cannot check that.
+#: Anything that reaches Plone from another thread: native routes,
+#: :func:`~ploneasgi.context.run_authenticated`, a server driven over HTTP.
 FUNCTIONAL_TESTING = FunctionalTesting(
     bases=(PLONEASGI_FIXTURE, WSGI_SERVER_FIXTURE),
     name="PloneasgiLayer:FunctionalTesting",
