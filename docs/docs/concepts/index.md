@@ -63,7 +63,3 @@ Permission ids, authentication through PAS, restricted traversal, and what is to
 Where a blob fetch runs on ZEO, RelStorage, and PGJsonb, and what it costs a worker.
 ````
 `````
-
-```{seealso}
-The Diátaxis framework calls this class of documentation [explanation](https://diataxis.fr/explanation/).
-```

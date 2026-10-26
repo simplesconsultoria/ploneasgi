@@ -30,7 +30,3 @@ serve-a-plone-site
 Create a site, serve it under uvicorn, and add a native route that knows who is asking.
 ````
 `````
-
-```{seealso}
-The Diátaxis framework calls this class of documentation [tutorials](https://diataxis.fr/tutorials/).
-```

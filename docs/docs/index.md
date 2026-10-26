@@ -92,34 +92,12 @@ Writing to the database from native routes, Windows, and any registration framew
 {doc}`concepts/native-routes` explains why discovery stays explicit.
 
 ```{toctree}
-:caption: Tutorials
 :maxdepth: 2
 :hidden: true
 
 tutorials/index
-```
-
-```{toctree}
-:caption: How-to guides
-:maxdepth: 2
-:hidden: true
-
 how-to-guides/index
-```
-
-```{toctree}
-:caption: Concepts
-:maxdepth: 2
-:hidden: true
-
 concepts/index
-```
-
-```{toctree}
-:caption: Reference
-:maxdepth: 2
-:hidden: true
-
 reference/index
 ```
 

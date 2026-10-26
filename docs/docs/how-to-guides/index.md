@@ -100,7 +100,3 @@ Run the starvation gate, the throughput comparison, and the storage matrix.
 Set up a checkout, run the checks, build the docs, and add a changelog entry.
 ````
 `````
-
-```{seealso}
-The Diátaxis framework calls this class of documentation [how-to guides](https://diataxis.fr/how-to-guides/).
-```

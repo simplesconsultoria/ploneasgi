@@ -125,7 +125,3 @@ Every module but {mod}`ploneasgi.testing` imports without Plone installed.
 
 The module pages document every public name, one page per module:
 {ref}`reference-api-app`, {ref}`reference-api-settings`, {ref}`reference-api-wsgi`, {ref}`reference-api-accesslog`, {ref}`reference-api-vhm`, {ref}`reference-api-zcml`, {ref}`reference-api-context`, {ref}`reference-api-zopeapp`, and {ref}`reference-api-testing`.
-
-```{seealso}
-The Diátaxis framework calls this class of documentation [reference](https://diataxis.fr/reference/).
-```
