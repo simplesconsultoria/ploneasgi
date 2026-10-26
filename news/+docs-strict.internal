@@ -1,0 +1,1 @@
+Made the documentation build fail on any Sphinx warning, in CI and in make docs-html. @ericof

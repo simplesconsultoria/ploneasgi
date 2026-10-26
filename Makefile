@@ -125,8 +125,8 @@ docs-install: ## Install the documentation toolchain
 	@$(MAKE) -C docs install
 
 .PHONY: docs-html
-docs-html: ## Build the documentation as HTML
-	@$(MAKE) -C docs html
+docs-html: ## Build the documentation as HTML, failing on any warning
+	@$(MAKE) -C docs html SPHINXOPTS="-W --keep-going"
 
 .PHONY: docs-livehtml
 docs-livehtml: ## Rebuild the documentation on every change and serve it
