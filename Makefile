@@ -117,6 +117,29 @@ build: ## Build the sdist and wheel
 changelog: $(VENV_FOLDER) ## Preview the changelog
 	@uv run --with towncrier towncrier build --draft
 
+# The documentation is its own uv project, with its own environment in
+# docs/.venv: Sphinx and its extensions stay out of the package's test env, and
+# docs/Makefile is the cookieplone scaffold's, kept close to upstream.
+.PHONY: docs-install
+docs-install: ## Install the documentation toolchain
+	@$(MAKE) -C docs install
+
+.PHONY: docs-html
+docs-html: ## Build the documentation as HTML
+	@$(MAKE) -C docs html
+
+.PHONY: docs-livehtml
+docs-livehtml: ## Rebuild the documentation on every change and serve it
+	@$(MAKE) -C docs livehtml
+
+.PHONY: docs-vale
+docs-vale: ## Check the documentation's spelling, grammar and style
+	@$(MAKE) -C docs vale VALEOPTS="--minAlertLevel='warning'"
+
+.PHONY: docs-linkcheck
+docs-linkcheck: ## Check the documentation for broken links
+	@$(MAKE) -C docs linkcheckbroken
+
 ADAPTER?=ploneasgi
 SLOW_CLIENTS?=16
 REPS?=3
