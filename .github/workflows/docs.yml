@@ -43,8 +43,10 @@ jobs:
       - name: Check for broken links
         run: make linkcheckbroken
 
+      # -W turns every Sphinx warning into a failure; --keep-going reports all
+      # of them in one run rather than stopping at the first.
       - name: Build HTML
-        run: make build
+        run: make build SPHINXOPTS="-W --keep-going"
 
       - name: Check style
         run: make vale VALEOPTS="--minAlertLevel='warning'"
