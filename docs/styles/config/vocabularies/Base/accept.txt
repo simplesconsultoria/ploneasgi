@@ -1,0 +1,15 @@
+ploneasgi
+uvicorn
+Starlette
+ZPublisher
+PGJsonb
+RelStorage
+storages
+unghost(s|ed)?
+[Ww]aitress
+anyio
+a2wsgi
+(?i)ASGI
+(?i)WSGI
+(?i)ZCML
+(?i)API

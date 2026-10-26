@@ -1,0 +1,60 @@
+[project]
+name = "ploneasgi-docs"
+description = "Documentation for ploneasgi: run Plone under an ASGI server, without spending a worker thread on a client's download."
+version = "1.0.0"
+keywords = [
+    "ploneasgi",
+    "documentation",
+    "Plone",
+    "ASGI",
+    "Diátaxis",
+]
+readme = "README.md"
+requires-python = "==3.14.*"
+license = { file = "LICENSE.md" }
+maintainers = [
+    { name = "Érico Andrei", email = "ericof@plone.org" },
+]
+authors = [
+    { name = "Érico Andrei", email = "ericof@plone.org" },
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Operating System :: POSIX",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+]
+# The `testing` extra because ploneasgi.testing imports Plone at module scope,
+# and its reference page is autodoc'd like every other module.
+dependencies = [
+    "ploneasgi[testing]",
+]
+
+[dependency-groups]
+dev = [
+    "graphviz",
+    "linkify-it-py",
+    "myst-parser",
+    "plone-sphinx-theme>=1.4.1",
+    "sphinx-autobuild",
+    "sphinx-copybutton",
+    "sphinx-design",
+    "sphinx-examples",
+    "sphinx-notfound-page",
+    "sphinx-reredirects",
+    "sphinx-sitemap",
+    "sphinx-tippy",
+    "sphinxcontrib-mermaid",
+    "sphinxext-opengraph",
+    "vale",
+]
+
+[project.urls]
+Repository = "https://github.com/simplesconsultoria/ploneasgi"
+Documentation = "https://simplesconsultoria.github.io/ploneasgi/"
+
+# Editable, or autodoc documents a snapshot of the tree taken at install time:
+# a module added since then reads as one that "does not exist".
+[tool.uv.sources]
+ploneasgi = { path = "../", editable = true }
