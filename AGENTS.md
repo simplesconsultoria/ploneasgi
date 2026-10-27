@@ -55,7 +55,7 @@ ploneasgi/
 ├── tests/             # 136 tests, none of which need Plone
 │   ├── plone/         # 43 more that do — skipped when Plone is absent
 │   └── bench/         # live-server gates — deselected by default:
-│                      #   3 `bench` (stand-in app), 11 `bench_plone` (real Plone),
+│                      #   3 `bench` (stand-in app), 12 `bench_plone` (real Plone),
 │                      #   9 `bench_storage` (ZEO, RelStorage, PGJsonb × 3)
 ├── benchmarks/
 │   ├── bench_adapter.py  # serves /page and /download under either adapter
