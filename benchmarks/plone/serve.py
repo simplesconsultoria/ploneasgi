@@ -8,11 +8,15 @@ collected the way a project's ``server.py`` would collect them.
 ``a2wsgi`` goes in through ``create_app``'s ``adapter`` seam, so the two arms
 differ in the adapter alone — same routes, same middleware, same Zope.
 
+One route is passed directly rather than through ZCML:
+:func:`endpoints.whoami_two_hops`, the comparison arm of ``run.py routes``.
+
 Usage::
 
     python benchmarks/plone/serve.py ploneasgi --zope-conf <instance>/etc/zope.conf
 """
 
+from endpoints import whoami_two_hops
 from pathlib import Path
 from ploneasgi import create_app
 from ploneasgi import serve
@@ -20,6 +24,7 @@ from ploneasgi import Settings
 from ploneasgi.zcml import routes_from_registry
 from ploneasgi.zopeapp import build_wsgi_app
 from ploneasgi.zopeapp import check_concurrency_contract
+from starlette.routing import Route
 
 import argparse
 
@@ -64,7 +69,10 @@ def main() -> None:
     check_concurrency_contract(settings)
     app = create_app(
         settings,
-        routes=routes_from_registry(),
+        routes=[
+            *routes_from_registry(),
+            Route(f"{settings.route_prefix}/whoami-two-hops", whoami_two_hops),
+        ],
         wsgi_app=wsgi_app,
         adapter=a2wsgi_adapter if args.adapter == "a2wsgi" else None,
     )

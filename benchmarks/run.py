@@ -16,9 +16,11 @@ Usage::
     python benchmarks/run.py starve     --adapter ploneasgi --slow-clients 16
     python benchmarks/run.py throughput --adapter a2wsgi --reps 3
     python benchmarks/run.py capacity   --adapter ploneasgi --slow-clients 8
+    python benchmarks/run.py routes     --adapter ploneasgi --plone-instance DIR
 
 Comparing adapters means comparing *processes*, so each invocation covers one
-arm. ``make bench-compare`` alternates them.
+arm. ``make bench-compare`` alternates them. ``routes`` is the exception: its
+arms are two routes on one server, so it interleaves them itself.
 """
 
 from contextlib import closing
@@ -159,6 +161,10 @@ class BenchServer:
         """:returns: URL of the page that gets probed."""
         return f"http://127.0.0.1:{self.port}{self.page_path}"
 
+    def route_url(self, name: str) -> str:
+        """:returns: URL of a native route, under the default prefix."""
+        return f"http://127.0.0.1:{self.port}/++asgi++/{name}"
+
     @property
     def download_url(self) -> str:
         """:returns: URL of the streamed body the slow clients hold open."""
@@ -290,10 +296,21 @@ def main() -> int:
     cap.add_argument("--duration", type=float, default=10.0)
     cap.add_argument("--timeout", type=float, default=30.0)
 
-    for subparser in (st, tp, cap):
+    rt = sub.add_parser(
+        "routes", help="native-route req/s: one context per request vs two"
+    )
+    rt.add_argument("--concurrency", type=int, default=8)
+    rt.add_argument("--page-concurrency", type=int, default=4)
+    rt.add_argument("--duration", type=float, default=5.0)
+    rt.add_argument("--reps", type=int, default=3)
+    rt.add_argument("--timeout", type=float, default=30.0)
+
+    for subparser in (st, tp, cap, rt):
         _add_common(subparser)
 
     args = parser.parse_args()
+    if args.mode == "routes" and args.plone_instance is None:
+        parser.error("routes needs --plone-instance: the routes are Plone's")
 
     with BenchServer(
         args.adapter,
@@ -324,6 +341,25 @@ def main() -> int:
                     args.reps,
                 )
             )
+        elif args.mode == "routes":
+            rows = asyncio.run(
+                driver.run_routes(
+                    {
+                        # The new contract: guard and handler in one context.
+                        "one-hop": driver.Target.parse(server.route_url("whoami")),
+                        # The old one, kept by hand: a context each.
+                        "two-hops": driver.Target.parse(
+                            server.route_url("whoami-two-hops")
+                        ),
+                    },
+                    driver.Target.parse(server.page_url),
+                    concurrency=args.concurrency,
+                    page_concurrency=args.page_concurrency,
+                    duration=args.duration,
+                    reps=args.reps,
+                    timeout=args.timeout,
+                )
+            )
         else:
             rows = asyncio.run(
                 driver.run_capacity(
@@ -348,6 +384,8 @@ def main() -> int:
     else:
         print(f"== {args.adapter}, workers={args.workers} ==")
         driver._print_table(rows)
+        if args.mode == "routes":
+            driver._print_routes_summary(rows)
     return 0
 
 

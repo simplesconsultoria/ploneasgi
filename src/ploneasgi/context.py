@@ -38,6 +38,7 @@ from functools import partial
 from ploneasgi.wsgi import build_environ
 from starlette.types import Scope
 from typing import Any
+from typing import IO
 
 import anyio
 import io
@@ -135,7 +136,7 @@ class PloneContext:
         return bool(getSecurityManager().checkPermission(permission, obj))
 
 
-def _publisher_request(scope: Scope) -> Any:
+def _publisher_request(scope: Scope, body: IO[bytes] | None = None) -> Any:
     """Build a publisher request from an ASGI scope.
 
     PAS reaches into a request that traversal has already filled in, so a
@@ -148,8 +149,14 @@ def _publisher_request(scope: Scope) -> Any:
     they are normalized to a GET over http/https. PAS only reads the headers and
     cookies; the method matters to it not at all.
 
+    The body is not parsed here. Authentication reads headers and cookies only,
+    exactly as before a body could be passed; a caller that wants
+    ``request.form`` calls ``processInputs()`` itself, inside its own error
+    handling, since a malformed body raises ``BadRequest`` there.
+
     :param scope: The ASGI connection scope.
-    :returns: An ``HTTPRequest`` with an empty body.
+    :param body: The request body, positioned at its start; empty when omitted.
+    :returns: An ``HTTPRequest``.
     """
     from ZPublisher.HTTPRequest import HTTPRequest
     from ZPublisher.HTTPResponse import HTTPResponse
@@ -160,7 +167,8 @@ def _publisher_request(scope: Scope) -> Any:
     scheme = normalized.get("scheme", "http")
     normalized["scheme"] = {"ws": "http", "wss": "https"}.get(scheme, scheme)
 
-    body = io.BytesIO(b"")
+    if body is None:
+        body = io.BytesIO(b"")
     environ = build_environ(normalized, body)
     response = HTTPResponse(stdout=io.BytesIO())
     return HTTPRequest(body, environ, response)
@@ -210,6 +218,7 @@ def _run_sync(
     work: Callable[[PloneContext], Any],
     site_id: str,
     db: Any,
+    body: IO[bytes] | None = None,
 ) -> Any:
     """Establish the context, run ``work``, and tear everything down.
 
@@ -221,6 +230,7 @@ def _run_sync(
     :param work: The callable to run with the established context.
     :param site_id: Path from the Zope root to the site, or to an object in it.
     :param db: The ZODB database to open a connection on.
+    :param body: The request body for the publisher request.
     :returns: Whatever ``work`` returns.
     :raises SiteNotFound: When the path enters no Plone site.
     """
@@ -231,7 +241,7 @@ def _run_sync(
 
     import transaction
 
-    request = _publisher_request(scope)
+    request = _publisher_request(scope, body)
     connection = db.open()
     try:
         # Wrapping the root in a RequestContainer is what `makerequest` does: it
@@ -270,6 +280,7 @@ async def run_authenticated(
     site_id: str,
     db: Any = None,
     limiter: anyio.CapacityLimiter | None = None,
+    body: IO[bytes] | None = None,
 ) -> Any:
     """Run ``work`` in a worker thread with an authenticated Plone context.
 
@@ -286,10 +297,14 @@ async def run_authenticated(
         :func:`ploneasgi.app.create_app` publishes as ``app.state.zodb_limiter``
         — the adapter's ``app_limiter`` — so native routes share the WSGI
         requests' ZODB pool budget; with neither, anyio's default pool.
+    :param body: The request body, already read on the event loop and
+        positioned at its start, for ``ctx.request`` to read. The caller owns
+        it and closes it; reading it here, in the thread, would mean a
+        blocking round trip to the event loop per read.
     :returns: Whatever ``work`` returns.
     """
     return await anyio.to_thread.run_sync(
-        partial(_run_sync, scope, work, site_id, db or default_db()),
+        partial(_run_sync, scope, work, site_id, db or default_db(), body),
         limiter=limiter if limiter is not None else limiter_for(scope),
     )
 

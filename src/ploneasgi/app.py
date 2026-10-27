@@ -140,6 +140,9 @@ def create_app(
     # check_concurrency_contract compares with the pool size. An adapter
     # without one (a2wsgi) leaves native routes on anyio's default pool.
     app.state.zodb_limiter = getattr(mounted, "app_limiter", None)
+    # Native HTTP routes read their request body before the thread hop, and
+    # hold it to the same limit Zope's requests are held to.
+    app.state.max_body_size = settings.max_body_size or None
     return app
 
 

@@ -10,6 +10,9 @@ wheels/
 # The glob matters: `make test-no-plone` builds a second one, .venv-no-plone.
 .venv*
 
+# The instance `make bench-routes` builds and reuses
+.bench-routes-instance/
+
 # Tool caches
 .pytest_cache/
 .ruff_cache/

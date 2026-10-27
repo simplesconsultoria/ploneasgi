@@ -23,6 +23,9 @@ A forgotten permission and an endpoint that is open on purpose must never look t
 
 The guard checks the permission against the portal, as the connecting user, before the handler runs.
 An endpoint therefore cannot forget to authorize itself.
+
+For an HTTP route, the check and the handler run in the same context: one worker thread, one ZODB connection, one authentication.
+What the guard checked is what the handler reads, from the same snapshot, as the same user.
 A websocket that fails the check is closed without being accepted, because accepting first and closing after would tell an unauthorized client that the endpoint exists, and hand it a live socket, however short-lived.
 
 ## Permission ids, not titles
@@ -69,14 +72,23 @@ Every call ends in `transaction.abort()`.
 A context reads and commits nothing, and anything the work dirties by accident is discarded, so a read-only endpoint cannot become a writer by mistake.
 Writing needs its own answer to conflict errors and retries, which a read never has to give, and is not enabled.
 
-`work` must return plain data.
-A persistent object returned to the event loop belongs to a connection that has been closed.
+`work`, and an HTTP handler's response, must hold plain data.
+A persistent object that reaches the event loop belongs to a connection that has been closed.
+A blob is the exception that proves the rule: open it in the thread with `openDetached()`, which returns a plain file on the committed blob, and stream that.
 
 ## The cost of the guard
 
-A guarded route opens two ZODB connections per request, one after the other: one for the permission check, and one for whatever the handler does.
-Both draw on the same limiter as WSGI requests, so the pool budget holds, but it is a second thread hop.
-Merging them would mean handing the handler a context it did not ask for, which would change the handler API.
+Measured in-process on a warm FileStorage, the permission check costs a fraction of a millisecond.
+The thread hop around it is what costs, because the hop draws on the same limiter as page renders.
+
+An HTTP handler is a sync function that runs inside the guard's own call for that reason.
+Before, the guard and an async handler each called `run_authenticated`: two thread hops, two connections, two authentications, and under load two waits for a limiter slot behind page renders.
+`make bench-routes` serves both shapes side by side.
+On one laptop, with four workers, five cycles and a warm FileStorage, the single call served a median of 1.62 times the requests per second of the two calls on its own, and 1.37 times beside page renders.
+The spreads of the two shapes did not overlap.
+
+A websocket still checks in a call of its own before it is accepted.
+Its handler runs for as long as the client stays connected, and must not hold a worker thread or a connection for that long.
 
 ## How it is tested
 

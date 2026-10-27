@@ -85,12 +85,70 @@ DISCONNECTED_KEY = "ploneasgi.disconnected"
 _EXHAUSTED = object()
 
 
-class _BodyTooLarge(Exception):
+class BodyTooLarge(Exception):
     """The request body is larger than the adapter accepts."""
 
 
-class _ClientGone(Exception):
+class ClientGone(Exception):
     """The client disconnected before its request body arrived."""
+
+
+async def read_body(
+    scope: Scope,
+    receive: Receive,
+    *,
+    max_body_size: int | None = MAX_BODY_SIZE,
+    spool_max_size: int = SPOOL_MAX_SIZE,
+) -> Any:
+    """Drain a request body into a seekable file-like object.
+
+    The whole body is read before anything runs in a worker thread. a2wsgi
+    instead streams it lazily, at the cost of a blocking round trip to the
+    event loop every time the app reads — the very thing this adapter removes.
+    The trade is that a large upload is buffered; it spills to disk past
+    ``spool_max_size`` so that memory stays bounded, and is refused past
+    ``max_body_size`` so that the disk does too.
+
+    Shared with the native HTTP routes, which hand the body to a publisher
+    request in a worker thread and so cannot ``await`` it there either.
+
+    :param scope: The ASGI connection scope, for ``Content-Length``.
+    :param receive: The ASGI receive callable.
+    :param max_body_size: Largest body accepted; ``None`` for no limit.
+    :param spool_max_size: Size above which the body spills to disk.
+    :returns: A file-like object positioned at the start of the body. The
+        caller closes it.
+    :raises BodyTooLarge: When the body exceeds ``max_body_size`` — declared,
+        or actually received, since chunked uploads declare nothing.
+    :raises ClientGone: When the client disconnects mid-body. The app is never
+        called with a truncated body: an upload cut short would otherwise be
+        processed as if it were complete.
+    """
+    limit = max_body_size
+    if limit is not None and _declared_length(scope) > limit:
+        raise BodyTooLarge
+
+    # Not a context manager: the file outlives this call, and the caller closes
+    # it once whatever reads it has returned.
+    body = SpooledTemporaryFile(max_size=spool_max_size)  # noqa: SIM115
+    received = 0
+    more_body = True
+    try:
+        while more_body:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                raise ClientGone
+            chunk = message.get("body", b"")
+            received += len(chunk)
+            if limit is not None and received > limit:
+                raise BodyTooLarge
+            body.write(chunk)
+            more_body = message.get("more_body", False)
+    except BaseException:
+        body.close()
+        raise
+    body.seek(0)
+    return body
 
 
 class _StartResponse:
@@ -293,52 +351,6 @@ class WSGIMiddleware:
                 await send({"type": "lifespan.shutdown.complete"})
                 return
 
-    async def _read_body(self, scope: Scope, receive: Receive) -> Any:
-        """Drain the request body into a seekable file-like object.
-
-        The whole body is read before the WSGI app is called. a2wsgi instead
-        streams it lazily, at the cost of a blocking round trip to the event loop
-        every time the app reads — the very thing this adapter removes. The
-        trade is that a large upload is buffered; it spills to disk past
-        ``spool_max_size`` so that memory stays bounded, and is refused past
-        ``max_body_size`` so that the disk does too.
-
-        :param scope: The ASGI connection scope, for ``Content-Length``.
-        :param receive: The ASGI receive callable.
-        :returns: A file-like object positioned at the start of the body.
-        :raises _BodyTooLarge: When the body exceeds ``max_body_size`` —
-            declared, or actually received, since chunked uploads declare
-            nothing.
-        :raises _ClientGone: When the client disconnects mid-body. The app is
-            never called with a truncated body: an upload cut short would
-            otherwise be processed as if it were complete.
-        """
-        limit = self.max_body_size
-        if limit is not None and _declared_length(scope) > limit:
-            raise _BodyTooLarge
-
-        # Not a context manager: the file outlives this call as the environ's
-        # ``wsgi.input`` and is closed by _handle_http once the app has returned.
-        body = SpooledTemporaryFile(max_size=self.spool_max_size)  # noqa: SIM115
-        received = 0
-        more_body = True
-        try:
-            while more_body:
-                message = await receive()
-                if message["type"] == "http.disconnect":
-                    raise _ClientGone
-                chunk = message.get("body", b"")
-                received += len(chunk)
-                if limit is not None and received > limit:
-                    raise _BodyTooLarge
-                body.write(chunk)
-                more_body = message.get("more_body", False)
-        except BaseException:
-            body.close()
-            raise
-        body.seek(0)
-        return body
-
     def _call_app(
         self, environ: dict[str, Any], start_response: _StartResponse
     ) -> Iterable[bytes]:
@@ -361,11 +373,18 @@ class WSGIMiddleware:
         :param send: The ASGI send callable.
         """
         try:
-            body_file = await self._read_body(scope, receive)
-        except _BodyTooLarge:
+            # The file outlives the read as the environ's ``wsgi.input`` and is
+            # closed below, once the app has returned.
+            body_file = await read_body(
+                scope,
+                receive,
+                max_body_size=self.max_body_size,
+                spool_max_size=self.spool_max_size,
+            )
+        except BodyTooLarge:
             await _send_error(send, 413, b"Request Entity Too Large", close=True)
             return
-        except _ClientGone:
+        except ClientGone:
             logger.debug("client disconnected before its request body arrived")
             return
 
