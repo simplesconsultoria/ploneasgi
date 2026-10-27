@@ -21,7 +21,7 @@ ploneasgi releases the thread when Zope returns, and streams the file from the e
 | uvicorn and ploneasgi | 16 | 12 / 12 |
 
 **Status:** a spike, and the API will change.
-It requires Python 3.14 and is tested with Plone 6.2.1, on FileStorage, ZEO, RelStorage, and PGJsonb.
+It requires Python 3.14 and is tested with Plone 6.2.2, on FileStorage, ZEO, RelStorage, and PGJsonb.
 
 ```{warning}
 This documentation was written with Claude Opus 5.5, following the [Plone documentation style skill](https://github.com/plone/plone-doc-style-skill), and reviewed by a human being.
