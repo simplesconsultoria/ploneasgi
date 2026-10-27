@@ -25,6 +25,18 @@ That position has a cost.
 A native route does not go through ZPublisher, so it gets no traversal, no site, no authentication, and no ZODB connection for free.
 {func}`~ploneasgi.context.run_authenticated` exists to supply all four, in one tested place, so each endpoint does not derive its own.
 
+## Two kinds of handler
+
+An HTTP route registered in ZCML has a sync handler.
+It runs in a worker thread, inside the context the route's permission was checked in, and returns a Starlette response.
+The request does its Plone work in one thread hop, and the response, streamed or not, is sent on the event loop after the thread is released.
+
+A websocket handler is async, and runs on the event loop.
+A session lasts as long as the client stays connected, which no worker thread should wait out.
+It reaches Plone, when it needs to, with its own calls to `run_authenticated`.
+
+A route passed to `create_app` directly is a plain Starlette endpoint, async, and does the same.
+
 ## The proxy problem
 
 A deployment already sends every request through a proxy rule that rewrites it for VirtualHostMonster:

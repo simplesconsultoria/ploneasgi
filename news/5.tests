@@ -1,0 +1,1 @@
+Added `make bench-routes`, which serves a native route checked and run in one context beside the same route checked and run in two, and compares their requests per second, on their own and beside page renders. @ericof

@@ -22,6 +22,11 @@ decides anything architectural.
     so it reports what the server can take rather than latency at a rate chosen
     in advance.
 
+``routes``
+    Native-route throughput, two or more request shapes for the same work,
+    interleaved — on their own, and sharing the ZODB limiter with page renders.
+    Closed-loop like ``capacity``. Driven against real Plone by ``run.py``.
+
 Stdlib only (raw ``asyncio`` streams), because throttling a client precisely is
 easier at the socket than through an HTTP library, and because the ASGI stack
 under test should not share an event loop's worth of dependencies with its own
@@ -413,6 +418,112 @@ async def run_capacity(
     await asyncio.gather(*slow, return_exceptions=True)
 
     return rows
+
+
+#: The rounds of :func:`run_routes`: the route on its own, then sharing the
+#: server with page renders.
+ROUTE_ROUNDS = ("alone", "with-pages")
+
+
+async def run_routes(
+    arms: dict[str, Target],
+    page: Target,
+    *,
+    concurrency: int,
+    page_concurrency: int,
+    duration: float,
+    reps: int,
+    timeout: float,
+) -> list[dict]:
+    """Measure native-route throughput, arms interleaved, alone and beside pages.
+
+    Every arm is the same work behind a different request shape, so what
+    separates them is what each request costs on the way to its handler. The
+    ``with-pages`` round runs closed-loop page renders at the same time: they
+    draw on the same ZODB limiter, so a request that queues on it twice waits
+    behind them twice.
+
+    Arms alternate inside every round, and their order flips on every
+    repetition, so neither always runs first on a cold or a warm machine.
+
+    :param arms: Mapping of arm name to route target.
+    :param page: The page rendered beside the route in ``with-pages``.
+    :param concurrency: Simultaneous route clients.
+    :param page_concurrency: Simultaneous page clients in ``with-pages``.
+    :param duration: Seconds to measure per arm per round.
+    :param reps: Repetitions of the whole cycle.
+    :param timeout: Per-request deadline.
+    :returns: One row per arm per round per repetition.
+    """
+    for target in (*arms.values(), page):
+        await warm_up(target)
+
+    rows = []
+    for rep in range(reps):
+        order = list(arms.items())
+        if rep % 2:
+            order.reverse()
+        for round_name in ROUTE_ROUNDS:
+            for name, target in order:
+                pages: Sample | None = None
+                if round_name == "alone":
+                    sample, wall = await _drive_page(
+                        target, concurrency, duration, timeout
+                    )
+                else:
+                    (sample, wall), (pages, page_wall) = await asyncio.gather(
+                        _drive_page(target, concurrency, duration, timeout),
+                        _drive_page(page, page_concurrency, duration, timeout),
+                    )
+                latencies = sample.latencies()
+                rows.append({
+                    "mode": "routes",
+                    "arm": name,
+                    "round": round_name,
+                    "rep": rep,
+                    "requests": len(sample.results),
+                    "ok": len(sample.ok),
+                    "failed": len(sample.results) - len(sample.ok),
+                    "req_s": round(len(sample.ok) / wall, 2) if wall else 0.0,
+                    "p50_ms": round(_pct(latencies, 0.50) * 1000, 2),
+                    "p95_ms": round(_pct(latencies, 0.95) * 1000, 2),
+                    "page_req_s": (
+                        round(len(pages.ok) / page_wall, 2) if pages else None
+                    ),
+                    "page_failed": (
+                        len(pages.results) - len(pages.ok) if pages else None
+                    ),
+                    "errors": [r.error for r in sample.results if r.error][:3],
+                })
+    return rows
+
+
+def _print_routes_summary(rows: list[dict]) -> None:
+    """Print each arm's spread per round, and the gap between the arms.
+
+    :param rows: Rows from :func:`run_routes`.
+    """
+    arms = list(dict.fromkeys(row["arm"] for row in rows))
+    for round_name in ROUTE_ROUNDS:
+        print(f"\n{round_name}:")
+        medians = {}
+        for arm in arms:
+            mine = [r for r in rows if r["arm"] == arm and r["round"] == round_name]
+            if not mine:
+                continue
+            rates = [r["req_s"] for r in mine]
+            p50s = [r["p50_ms"] for r in mine]
+            medians[arm] = statistics.median(rates)
+            print(
+                f"  {arm:<10} req/s median {medians[arm]:.1f} "
+                f"(min {min(rates):.1f}, max {max(rates):.1f}), "
+                f"p50 ms median {statistics.median(p50s):.2f} "
+                f"(min {min(p50s):.2f}, max {max(p50s):.2f})"
+            )
+        if len(medians) == 2:
+            (first, a), (second, b) = medians.items()
+            if b:
+                print(f"  {first} / {second}: {a / b:.2f}x req/s")
 
 
 def _capacity_row(

@@ -7,7 +7,9 @@ through the whole stack a deployment uses: VirtualHostMonster rewrite, ZCML
 route, permission guard, worker-thread context.
 
 The routes come from ``benchmarks/plone/routes.zcml``: ``/whoami`` guarded by
-``zope2.View``, ``/whoami-manager`` by ``cmf.ManagePortal``.
+``zope2.View``, ``/whoami-manager`` by ``cmf.ManagePortal``, and
+``/download/{path}`` streaming a File's blob. ``/whoami-two-hops`` is passed to
+``create_app`` by ``serve.py``.
 """
 
 from . import basic_auth
@@ -135,3 +137,29 @@ class TestNativeRoutes:
     def test_a_root_that_is_not_a_site_is_not_found(self, live, root):
         base, _ = live
         assert fetch(base, rewritten(root, "/++asgi++/whoami"))[0] == 404
+
+    def test_the_two_hop_arm_answers_like_the_route(self, live):
+        """The comparison arm of ``run.py routes`` must do the same work."""
+        base, _ = live
+        one = json.loads(fetch(base, "/++asgi++/whoami")[2])
+        two = json.loads(fetch(base, "/++asgi++/whoami-two-hops")[2])
+        assert {k: v for k, v in one.items() if k != "url"} == {
+            k: v for k, v in two.items() if k != "url"
+        }
+
+    def test_a_blob_streams_whole_from_a_native_route(self, live, manifest):
+        """Opened in the worker thread, sent after it is released."""
+        base, _ = live
+        site = manifest["site"]
+        path = manifest["download"]["path"].removeprefix(f"/{site}/")
+        status, headers, body = fetch(base, f"/++asgi++/download/{path}")
+        assert status == 200
+        assert len(body) == manifest["download"]["size"]
+        assert int(headers["content-length"]) == manifest["download"]["size"]
+
+    def test_a_private_blob_is_refused_from_a_native_route(self, live, manifest):
+        """Traversal checks every step; the handler's Unauthorized is a 403."""
+        base, _ = live
+        site = manifest["site"]
+        path = manifest["private"]["path"].removeprefix(f"/{site}/")
+        assert fetch(base, f"/++asgi++/download/{path}")[0] == 403

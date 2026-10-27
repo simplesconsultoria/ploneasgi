@@ -36,16 +36,39 @@ The ``permission`` attribute is the reason this is worth having over a plain lis
 of routes. It is checked against the portal, inside
 :func:`ploneasgi.context.run_authenticated`, before the handler is entered — so
 an endpoint cannot forget to authorize itself.
+
+The two route types run differently, because they last differently:
+
+* An **http** handler is a sync function, called in the worker thread inside
+  the same context the permission was checked in::
+
+      def whoami(ctx: PloneContext, request: Request) -> Response:
+          return JSONResponse({"user": ctx.user.getUserName()})
+
+  One thread hop, one ZODB connection, one authentication per request. A
+  ``StreamingResponse`` or ``FileResponse`` still sends its body on the event
+  loop, after the thread is released.
+* A **websocket** handler is ``async def handler(websocket)``. A session lasts
+  as long as the client stays, and must not hold a worker thread; the check
+  runs in a call of its own before the socket is accepted.
 """
 
 from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import field
+from functools import partial
+from http import HTTPStatus
+from ploneasgi.context import NotAuthenticated
 from ploneasgi.context import run_authenticated
 from ploneasgi.context import SiteNotFound
 from ploneasgi.vhm import DEFAULT_PREFIX
 from ploneasgi.vhm import SITE_KEY
+from ploneasgi.wsgi import BodyTooLarge
+from ploneasgi.wsgi import ClientGone
+from ploneasgi.wsgi import MAX_BODY_SIZE
+from ploneasgi.wsgi import read_body
 from starlette.responses import PlainTextResponse
+from starlette.responses import Response
 from starlette.routing import BaseRoute
 from starlette.routing import Route
 from starlette.routing import WebSocketRoute
@@ -77,7 +100,8 @@ class ASGIRoute:
     """One registered route, as declared in ZCML.
 
     :ivar path: Path pattern, relative to the reserved prefix.
-    :ivar handler: The endpoint callable.
+    :ivar handler: The endpoint callable: ``handler(ctx, request)`` returning a
+        ``Response`` for http, ``async handler(websocket)`` for websocket.
     :ivar type: ``http`` or ``websocket``.
     :ivar methods: HTTP methods; ignored for websocket routes.
     :ivar permission: Id of the permission required on the portal, or ``None``.
@@ -140,54 +164,163 @@ def _permission_title(permission_id: str) -> str | None:
     return None if permission is None else permission.title
 
 
-async def _is_allowed(scope: Any, route: ASGIRoute) -> bool:
-    """Check the route's permission against the portal, as the connecting user.
+def _permitted(ctx: Any, route: ASGIRoute) -> bool:
+    """Check the route's permission against the portal, as the context's user.
 
-    :param scope: The ASGI connection scope.
+    Runs inside the worker thread, with the context established.
+
+    :param ctx: The authenticated context.
     :param route: The registered route.
     :returns: Whether the request may proceed.
     """
     permission = route.permission
     if permission is None:
         return True
+    title = _permission_title(permission)
+    if title is None:
+        # Fail closed. Zope would treat the unknown name as Manager-only,
+        # which hides a typo for exactly the user most likely to test it.
+        logger.error(
+            "route %s declares unknown permission %r; refusing every request",
+            route.path,
+            permission,
+        )
+        return False
+    return ctx.check_permission(title, ctx.portal)
 
-    def check(ctx: Any) -> bool:
-        title = _permission_title(permission)
-        if title is None:
-            # Fail closed. Zope would treat the unknown name as Manager-only,
-            # which hides a typo for exactly the user most likely to test it.
-            logger.error(
-                "route %s declares unknown permission %r; refusing every request",
-                route.path,
-                permission,
-            )
-            return False
-        return ctx.check_permission(title, ctx.portal)
 
-    # Its own connection, closed before the handler runs: the handler is async
-    # and opens its own if it needs Plone. Two in sequence, never two at once,
-    # and both draw on the application's ZODB limiter (see limiter_for).
-    return bool(await run_authenticated(scope, check, site_id=_site_for(scope, route)))
+async def _is_allowed(scope: Any, route: ASGIRoute) -> bool:
+    """Check a websocket route's permission before the socket is accepted.
+
+    Its own connection, closed before the handler runs: a websocket session
+    lasts as long as the client stays, and must not hold a worker thread or a
+    ZODB connection for that long. HTTP routes check inside the handler's own
+    call instead; see :func:`_guarded_http`.
+
+    :param scope: The ASGI connection scope.
+    :param route: The registered route.
+    :returns: Whether the connection may proceed.
+    """
+    if route.permission is None:
+        return True
+    return bool(
+        await run_authenticated(
+            scope, partial(_permitted, route=route), site_id=_site_for(scope, route)
+        )
+    )
+
+
+def _status_for(exc: Exception) -> int | None:
+    """The HTTP status a Zope exception from a handler stands for.
+
+    Runs inside the worker thread, where Zope is importable; imported only once
+    a handler has raised, so a Zope-free caller never reaches it.
+
+    :param exc: What the handler, or the request's form parsing, raised.
+    :returns: ``403`` for ``Unauthorized``, ``400`` for ``BadRequest``, or
+        ``None`` for anything else, which is left to propagate as a 500.
+    """
+    from zExceptions import BadRequest
+    from zExceptions import Unauthorized
+
+    if isinstance(exc, Unauthorized):
+        return 403
+    if isinstance(exc, BadRequest):
+        return 400
+    return None
+
+
+def _respond(ctx: Any, request: Any, route: ASGIRoute) -> Any:
+    """Check the permission, then call the handler, in one context.
+
+    Runs inside the worker thread. The guard and the handler share one ZODB
+    connection, one authentication and one snapshot: what was checked is what
+    the handler reads.
+
+    :param ctx: The authenticated context.
+    :param request: The Starlette request; its body has already been read.
+    :param route: The registered route.
+    :returns: The handler's response, or the refusal.
+    """
+    if not _permitted(ctx, route):
+        return PlainTextResponse("Forbidden", status_code=403)
+    try:
+        # After the guard, so a refused client cannot learn anything from how
+        # its body parses. Fills ctx.request.form, as the publisher would.
+        ctx.request.processInputs()
+        return route.handler(ctx, request)
+    except NotAuthenticated:
+        return PlainTextResponse("Unauthorized", status_code=401)
+    except Exception as exc:
+        status = _status_for(exc)
+        if status is None:
+            raise
+        return PlainTextResponse(HTTPStatus(status).phrase, status_code=status)
+
+
+def _max_body_size(scope: Any) -> int | None:
+    """The request body limit of the application serving a request.
+
+    :param scope: The ASGI connection scope.
+    :returns: ``app.state.max_body_size`` as :func:`ploneasgi.app.create_app`
+        publishes it (``None`` for no limit), or the adapter's default when the
+        application published none.
+    """
+    state = getattr(scope.get("app"), "state", None)
+    return getattr(state, "max_body_size", MAX_BODY_SIZE)
 
 
 def _guarded_http(route: ASGIRoute) -> Callable[..., Any]:
-    """Wrap an HTTP endpoint in its permission check.
+    """Wrap an HTTP handler in its permission check.
+
+    One :func:`ploneasgi.context.run_authenticated` call per request:
+    authenticate, check the permission, call the sync handler, return its
+    ``Response``. A streaming body is then sent on the event loop, after the
+    thread and the ZODB connection are released.
+
+    The request body is read first, on the event loop: a handler in a thread
+    cannot ``await`` it. It is held to the same limit as Zope's requests, and
+    read before the permission check, as the adapter reads it before Zope runs.
 
     :param route: The registered route.
     :returns: The endpoint Starlette should call.
     """
 
     async def endpoint(request: Any) -> Any:
+        scope = request.scope
         try:
-            allowed = await _is_allowed(request.scope, route)
+            site_id = _site_for(scope, route)
+        except SiteNotFound as exc:
+            logger.info("no such site %s for %s", exc, route.path)
+            return PlainTextResponse("Not Found", status_code=404)
+        try:
+            body = await read_body(
+                scope, request.receive, max_body_size=_max_body_size(scope)
+            )
+        except BodyTooLarge:
+            # Closing: the rest of the body is still on the socket.
+            return PlainTextResponse(
+                "Request Entity Too Large",
+                status_code=413,
+                headers={"Connection": "close"},
+            )
+        except ClientGone:
+            logger.debug("client disconnected before its request body arrived")
+            return Response(status_code=400)  # nobody is left to receive it
+        try:
+            return await run_authenticated(
+                scope,
+                partial(_respond, request=request, route=route),
+                site_id=site_id,
+                body=body,
+            )
         except SiteNotFound as exc:
             # The site comes from a client-supplied Host header via the
             # rewrite, so an unknown one is a 404, not a traceback.
             logger.info("no such site %s for %s", exc, route.path)
             return PlainTextResponse("Not Found", status_code=404)
-        if not allowed:
-            return PlainTextResponse("Forbidden", status_code=403)
-        return await route.handler(request)
+        finally:
+            body.close()
 
     endpoint.__name__ = getattr(route.handler, "__name__", "endpoint")
     return endpoint
@@ -286,9 +419,11 @@ class IASGIRouteDirective(Interface):
     handler = GlobalObject(
         title="Handler",
         description=(
-            "The async endpoint. Called with a Starlette Request for http routes "
-            "and a WebSocket for websocket routes. Dotted name, relative names "
-            "like .endpoints.notify included — zope.configuration resolves it."
+            "The endpoint. For http routes, a sync function called in a worker "
+            "thread with a PloneContext and the Starlette Request, returning a "
+            "Response. For websocket routes, an async function called with the "
+            "WebSocket. Dotted name, relative names like .endpoints.notify "
+            "included — zope.configuration resolves it."
         ),
         required=True,
     )

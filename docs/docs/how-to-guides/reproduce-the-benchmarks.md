@@ -31,6 +31,8 @@ To run the same gate against a real Plone instance, which the harness generates:
 make bench-plone
 ```
 
+It also checks native routes over a socket, and runs a short version of the route comparison below, asserting only that every request succeeded.
+
 To run it on ZEO, RelStorage, and PGJsonb, with PostgreSQL in a throwaway Docker container:
 
 ```shell
@@ -61,6 +63,21 @@ make bench-compare REPS=5
 
 Report the spread across cycles, not the mean of one.
 Record the machine and conditions with any number you quote.
+
+## Compare native-route request shapes
+
+To measure what a native route's request shape costs, run:
+
+```shell
+make bench-routes REPS=5
+```
+
+It builds a Plone instance in `.bench-routes-instance` on the first run, then serves two routes that do the same work.
+`/++asgi++/whoami` checks its permission and runs its handler in one context, as every ZCML route does.
+`/++asgi++/whoami-two-hops` checks in one context and works in a second, as guarded routes did before.
+
+Each cycle drives both routes, alternated, first on their own and then beside page renders that share the ZODB limiter.
+The summary gives each route's requests per second and median latency, with their spread across cycles, and the ratio between the routes.
 
 ## Serve the stand-in app
 

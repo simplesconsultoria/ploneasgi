@@ -46,7 +46,7 @@ install-bench: ## Install the benchmark harness (adds a2wsgi)
 .PHONY: clean
 clean: ## Remove the virtual environment and build artifacts
 	@echo "$(GREEN)==> Cleaning$(RESET)"
-	@rm -rf $(VENV_FOLDER) $(NO_PLONE_VENV) dist build .pytest_cache .ruff_cache
+	@rm -rf $(VENV_FOLDER) $(NO_PLONE_VENV) $(ROUTES_INSTANCE) dist build .pytest_cache .ruff_cache
 
 .PHONY: format
 format: $(VENV_FOLDER) ## Format the codebase
@@ -202,6 +202,24 @@ bench-plone: install-plone install-bench ## Run the starvation gate and live che
 	  assert not missing, f'not installed: {missing}'; \
 	  print('  Plone and a2wsgi: present')"
 	@uv run pytest tests/bench -m bench_plone
+
+# The cost of a native route's request shape: one context per request against
+# two, alternated on one server, alone and beside page renders. Builds a
+# throwaway instance first; prints the numbers, asserts nothing.
+ROUTES_INSTANCE?=.bench-routes-instance
+
+.PHONY: bench-routes
+bench-routes: install-plone install-bench ## Native-route req/s, one context per request vs two, REPS cycles
+	@echo "$(GREEN)==> Native-route shapes over $(REPS) cycles$(RESET)"
+	@if [ ! -f $(ROUTES_INSTANCE)/manifest.json ]; then \
+	  uv run python -c "import sys; sys.path.insert(0, '.'); \
+	    from pathlib import Path; from tests.bench import build_plone_instance; \
+	    home = Path('$(ROUTES_INSTANCE)'); home.mkdir(exist_ok=True); \
+	    build_plone_instance(home.resolve())"; \
+	fi
+	@uv run python benchmarks/run.py routes --adapter ploneasgi \
+	  --plone-instance $(ROUTES_INSTANCE) --reps $(REPS)
+	@echo "$(GREEN)Read the spread, not the mean of one cycle.$(RESET)"
 
 .PHONY: install-storage
 install-storage: ## Install the networked storages (ZEO, RelStorage, PGJsonb)

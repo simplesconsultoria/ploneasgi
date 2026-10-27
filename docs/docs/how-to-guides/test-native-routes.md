@@ -67,6 +67,10 @@ from starlette.requests import Request
 import asyncio
 
 
+async def receive():
+    return {"type": "http.request", "body": b""}
+
+
 def scope(path, headers=()):
     return {
         "type": "http",
@@ -92,10 +96,11 @@ def test_anonymous_is_refused(portal):
         site=portal.getId(),
     )
     endpoint = build_route(route).endpoint
-    response = asyncio.run(endpoint(Request(scope("/++asgi++/status"))))
+    response = asyncio.run(endpoint(Request(scope("/++asgi++/status"), receive)))
     assert response.status_code == 403
 ```
 
+The endpoint reads the request body before it calls the handler, so the `Request` needs a `receive`; this one delivers an empty body.
 Send a Basic `authorization` header in `headers` to test as a user.
 
 ## Test both sides of a permission

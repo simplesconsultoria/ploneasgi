@@ -90,3 +90,12 @@ class TestMaxBodySize:
     def test_zero_disables_it(self, quiet):
         app = create_app(Settings(max_body_size=0), wsgi_app=wsgi_app)
         assert mounted(app).max_body_size is None
+
+    def test_reaches_the_native_routes(self, quiet):
+        """Published on the app, where a ZCML-built route can find it."""
+        app = create_app(Settings(max_body_size=2048), wsgi_app=wsgi_app)
+        assert app.state.max_body_size == 2048
+
+    def test_zero_disables_it_for_native_routes_too(self, quiet):
+        app = create_app(Settings(max_body_size=0), wsgi_app=wsgi_app)
+        assert app.state.max_body_size is None

@@ -52,14 +52,14 @@ ploneasgi/
 │   ├── settings.py    # environment-only configuration
 │   ├── app.py         # create_app / serve
 │   └── meta.zcml      # directive declaration
-├── tests/             # 136 tests, none of which need Plone
-│   ├── plone/         # 43 more that do — skipped when Plone is absent
+├── tests/             # 154 tests, none of which need Plone
+│   ├── plone/         # 55 more that do — skipped when Plone is absent
 │   └── bench/         # live-server gates — deselected by default:
-│                      #   3 `bench` (stand-in app), 12 `bench_plone` (real Plone),
+│                      #   3 `bench` (stand-in app), 19 `bench_plone` (real Plone),
 │                      #   9 `bench_storage` (ZEO, RelStorage, PGJsonb × 3)
 ├── benchmarks/
 │   ├── bench_adapter.py  # serves /page and /download under either adapter
-│   ├── driver.py         # generates load: starve / throughput / capacity
+│   ├── driver.py         # generates load: starve / throughput / capacity / routes
 │   ├── run.py            # starts the server, runs a mode, always tears down
 │   └── plone/            # the same, with a generated Zope instance as the app:
 │                         #   make_instance, create_content, serve, test routes
@@ -103,13 +103,14 @@ wrong side of the line.
 ```bash
 make install         # package + test dependencies
 make install-plone   # adds Plone and the test layer's harness
-make test            # whatever the venv supports: 136, or 179 with Plone
-make test-no-plone   # asserts Plone is absent, then runs the 136
-make test-plone      # asserts Plone is present, then runs the 43
+make test            # whatever the venv supports: 154, or 209 with Plone
+make test-no-plone   # asserts Plone is absent, then runs the 154
+make test-plone      # asserts Plone is present, then runs the 55
 make bench-test      # asserts the starvation claim; needs a live server
 make bench-plone     # the same claim and the live checks, on a real instance
 make bench-storage   # the claim on ZEO, RelStorage, PGJsonb; needs Docker
 make bench-compare   # interleaved ploneasgi vs a2wsgi throughput
+make bench-routes    # native-route req/s: one context per request vs two
 make lint            # read-only — safe for CI
 make format          # the writing one
 make changelog       # preview the towncrier draft
@@ -219,6 +220,11 @@ for asserting one is higher than usual.
 - **A route with no permission is a configuration error.** `<ploneasgi:route />`
   refuses to register one unless it says `unguarded="true"`. A forgotten
   permission and a deliberately open endpoint must never look identical.
+- **One context per native HTTP request.** The guard and the sync handler
+  share one `run_authenticated` call — one thread hop, one connection, one
+  authentication. `TestOneContextPerRequest` counts `db.open()`; a second
+  call queues behind page renders on the shared limiter, and `make
+  bench-routes` shows what that costs.
 - **Discovery stays explicit.** `create_app` scans nothing and looks nothing up.
   ZCML-registered routes reach it because the project calls
   `routes_from_registry()` and passes the result in.
@@ -265,10 +271,6 @@ for asserting one is higher than usual.
 - **`build_wsgi_app` is unit-tested only up to its guard clause.** The rest is
   exercised end to end by `make bench-plone`, which generates an instance and
   serves it, but no unit test covers it.
-- A guarded native route opens two ZODB connections in sequence (the guard,
-  then the handler's own `run_authenticated`). Both draw on the adapter's
-  `app_limiter`, published as `app.state.zodb_limiter` by `create_app`, so
-  the pool budget holds; merging them would change the handler API.
 - PGJsonb's S3 tier is untested (it would need MinIO); its PostgreSQL `bytea`
   blobs are covered by `make bench-storage`. ZEO and RelStorage run with
   unshared blob directories only.

@@ -18,4 +18,14 @@
       site="Plone"
       />
 
+  <!-- A blob streamed from a native route: opened in the worker thread, sent
+       after it is released. -->
+  <ploneasgi:route
+      handler="endpoints.download"
+      name="download"
+      path="/download/{path:path}"
+      permission="zope2.View"
+      site="Plone"
+      />
+
 </configure>

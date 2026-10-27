@@ -38,21 +38,17 @@ This downloads Plone, so it takes a few minutes.
 Create `src/my_site/endpoints.py`:
 
 ```python
-from ploneasgi import run_authenticated
-from ploneasgi.vhm import SITE_KEY
 from starlette.responses import JSONResponse
 
 
-async def hello(request):
-    def work(ctx):
-        return {
-            "user": ctx.user.getUserName(),
-            "site": ctx.portal.Title(),
-        }
-
-    data = await run_authenticated(request.scope, work, site_id=request.scope[SITE_KEY])
-    return JSONResponse(data)
+def hello(ctx, request):
+    return JSONResponse({
+        "user": ctx.user.getUserName(),
+        "site": ctx.portal.Title(),
+    })
 ```
+
+`ctx` is the site as the request's user sees it: ploneasgi has already opened the database, entered the site, and authenticated the request before it calls `hello`.
 
 Create `src/my_site/routes.zcml` to register it:
 

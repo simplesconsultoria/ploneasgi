@@ -10,7 +10,7 @@ myst:
 
 # The route directive
 
-<!-- source: src/ploneasgi/zcml.py, src/ploneasgi/meta.zcml -->
+<!-- source: src/ploneasgi/zcml.py, src/ploneasgi/meta.zcml, src/ploneasgi/app.py -->
 
 `<ploneasgi:route />` registers a native ASGI route from ZCML.
 
@@ -34,7 +34,7 @@ Include the declaration before any file that uses the directive:
 | Attribute | Required | Default | Meaning |
 | --- | --- | --- | --- |
 | `path` | yes | | Starlette path pattern, relative to the reserved prefix. It must start with `/`. |
-| `handler` | yes | | Dotted name of the async endpoint. Relative names such as `.endpoints.notify` resolve against the package of the ZCML file. |
+| `handler` | yes | | Dotted name of the endpoint: a sync function for `http`, an async function for `websocket`. Relative names such as `.endpoints.notify` resolve against the package of the ZCML file. |
 | `type` | no | `http` | `http` or `websocket`. |
 | `methods` | no | `GET` | Space-separated HTTP methods. Ignored for websocket routes. |
 | `permission` | no | | Id of the permission required on the portal, for example `zope2.View` or `cmf.ManagePortal`. |
@@ -48,12 +48,25 @@ Mounting
 :   A route declared with `path="/notify"` is served at the reserved prefix plus the path: `/++asgi++/notify` by default.
 
 Handler call
-:   An `http` handler receives a Starlette `Request`.
-    A `websocket` handler receives a Starlette `WebSocket`.
+:   An `http` handler is called as `handler(ctx, request)` in a worker thread, where `ctx` is a {class}`~ploneasgi.context.PloneContext` and `request` the Starlette `Request`.
+    It returns a Starlette `Response`.
+    The permission check and the handler share one {func}`~ploneasgi.context.run_authenticated` call: one ZODB connection, one authentication, and one snapshot per request.
+    A `websocket` handler is called as `await handler(websocket)` on the event loop, after the check.
+
+Response
+:   The response is sent on the event loop after the worker thread and the ZODB connection are released.
+    A `StreamingResponse` or `FileResponse` therefore holds no thread for the transfer.
+
+Request body
+:   The body is read on the event loop before the thread hop, and handed to `ctx.request`.
+    It is held to the application's `max_body_size`, published by {func}`~ploneasgi.app.create_app` as `app.state.max_body_size`; a larger body gets `413 Request Entity Too Large` and the connection is closed.
+    After the permission check, `ctx.request.processInputs()` fills `ctx.request.form` from the query string and the body.
+    The Starlette `request.body()` cannot be awaited from the handler.
 
 Permission check
 :   The permission is checked against the portal, as the connecting user, before the handler runs.
     The id is resolved to its title through the `IPermission` utility.
+    An `unguarded` route skips the check, but its handler still runs in an authenticated context.
 
 Unknown permission
 :   An id with no registered `IPermission` utility refuses every request, and the refusal is logged as an error.
@@ -61,6 +74,12 @@ Unknown permission
 Refusal
 :   An `http` request that fails the check gets `403 Forbidden`.
     A websocket that fails the check is closed with code `1008` without being accepted.
+
+Errors from the handler
+:   {class}`~ploneasgi.context.NotAuthenticated` becomes `401 Unauthorized`.
+    Zope's `Unauthorized`, raised by {meth}`~ploneasgi.context.PloneContext.traverse`, becomes `403 Forbidden`.
+    Zope's `BadRequest`, raised by form parsing on a malformed body, becomes `400 Bad Request`.
+    Any other exception propagates, and the server answers `500 Internal Server Error`.
 
 Unknown site
 :   A site path that enters no Plone site gets `404 Not Found` on `http`, and is refused on websocket.

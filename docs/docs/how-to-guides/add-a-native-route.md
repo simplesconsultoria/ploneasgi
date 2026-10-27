@@ -17,18 +17,21 @@ Register it in ZCML when it belongs to an add-on, or pass it to `create_app` whe
 
 ## Write the endpoint
 
-A native route is an async Starlette endpoint.
-An HTTP endpoint takes a `Request`:
+An HTTP endpoint registered in ZCML is a sync function.
+It takes a {class}`~ploneasgi.context.PloneContext` and a Starlette `Request`, and returns a Starlette `Response`:
 
 ```python
 from starlette.responses import JSONResponse
 
 
-async def status(request):
-    return JSONResponse({"ok": True})
+def status(ctx, request):
+    return JSONResponse({"ok": True, "site": ctx.portal.getId()})
 ```
 
-A websocket endpoint takes a `WebSocket`:
+It runs in a worker thread, after the permission check and in the same context.
+To read Plone content from it, see {doc}`read-content-from-a-route`.
+
+A websocket endpoint is async, and takes a `WebSocket`:
 
 ```python
 async def echo(websocket):
@@ -36,8 +39,6 @@ async def echo(websocket):
     async for message in websocket.iter_text():
         await websocket.send_text(message)
 ```
-
-To read Plone content from the endpoint, see {doc}`read-content-from-a-route`.
 
 ## Register it in ZCML
 
@@ -86,6 +87,13 @@ ZCML changes take effect when you restart the server.
 ## Pass it to `create_app`
 
 A project can pass Starlette routes directly.
+These are plain Starlette endpoints, async, with no context of their own:
+
+```python
+async def ping(request):
+    return JSONResponse({"ok": True})
+```
+
 Mount them under the reserved prefix, so the proxy rule serves them:
 
 ```python
@@ -96,7 +104,7 @@ prefix = settings.route_prefix
 app = create_app(
     settings,
     routes=[
-        Route(f"{prefix}/status", status),
+        Route(f"{prefix}/ping", ping),
         WebSocketRoute(f"{prefix}/echo", echo),
     ],
 )
@@ -104,6 +112,7 @@ app = create_app(
 
 A route passed this way has no permission guard.
 Check authorization in the endpoint, with {func}`~ploneasgi.context.run_authenticated`.
+Each call is a thread hop and a ZODB connection, so do the check and the work in one call.
 
 ## Check it
 
